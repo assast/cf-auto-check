@@ -17,20 +17,12 @@ class Config:
     # Test Configuration
     CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', 3600))  # seconds
     CONCURRENT_TESTS = int(os.getenv('CONCURRENT_TESTS', 5))
-    TIMEOUT = int(os.getenv('TIMEOUT', 5000))  # ms
-    TEST_URL = os.getenv('TEST_URL', 'https://www.cloudflare.com/cdn-cgi/trace')
     
     # Test Mode: cfip, proxyip, outbound, all
     TEST_MODE = os.getenv('TEST_MODE', 'cfip')
     
-    # Enable/Disable Features
-    ENABLE_LATENCY_TEST = os.getenv('ENABLE_LATENCY_TEST', 'true').lower() != 'false'
-    ENABLE_SPEED_TEST = os.getenv('ENABLE_SPEED_TEST', 'false').lower() == 'true'
+    # Enable/Disable Auto Update
     ENABLE_AUTO_UPDATE = os.getenv('ENABLE_AUTO_UPDATE', 'true').lower() != 'false'
-    
-    # Speed Test Configuration
-    SPEED_TEST_SIZE = int(os.getenv('SPEED_TEST_SIZE', 1048576))  # bytes
-    SPEED_TEST_DURATION = int(os.getenv('SPEED_TEST_DURATION', 10000))  # ms
     
     # Telegram Notification Configuration
     TG_ENABLED = os.getenv('TG_ENABLED', 'false').lower() == 'true'

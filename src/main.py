@@ -6,11 +6,10 @@ import csv
 import subprocess
 import platform
 import urllib3
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import socket
 from .config import Config
 from .logger import logger
 from .api_client import ApiClient
-from .tester import Tester
 from .telegram_notifier import TelegramNotifier
 
 # Suppress InsecureRequestWarning
@@ -19,13 +18,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 class CFAutoCheck:
     def __init__(self):
         self.api_client = ApiClient()
-        self.tester = Tester()
         self.telegram = TelegramNotifier()
         self.check_interval = Config.CHECK_INTERVAL
         self.concurrent_tests = Config.CONCURRENT_TESTS
         self.test_mode = Config.TEST_MODE
-        self.enable_latency_test = Config.ENABLE_LATENCY_TEST
-        self.enable_speed_test = Config.ENABLE_SPEED_TEST
         self.enable_auto_update = Config.ENABLE_AUTO_UPDATE
         
         self.running = True
@@ -161,8 +157,6 @@ class CFAutoCheck:
 
     def export_ips_by_port(self, cfips):
         """Group CF IPs by port and export to separate files for CFST."""
-        import socket
-        
         # Store mapping from IP to original cfip for later lookup
         # Use list to handle multiple domains resolving to same IP
         self.ip_to_cfip = {}
@@ -204,9 +198,6 @@ class CFAutoCheck:
 
     def _resolve_domain(self, domain):
         """Resolve domain using multiple methods"""
-        import socket
-        import subprocess
-        
         # Method 1: Standard socket resolution
         try:
             ip = socket.gethostbyname(domain)
@@ -261,8 +252,7 @@ class CFAutoCheck:
             '-f', port_ips_file,
             '-o', port_result_file,
             '-tp', str(port),  # Specify port
-            # '-url', 'https://cfspeed.520131420.xyz/500mb.bin',  # Speed test URL
-            '-url', 'https://download.parallels.com/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg',  # Speed test URL
+            '-url', 'https://download.parallels.com/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg',
             '-dn', str(top_count),
             '-n', str(self.concurrent_tests),
             '-p', str(top_count),  # Show results in console
@@ -378,8 +368,7 @@ class CFAutoCheck:
             cfst_results = self.run_cfst(top_count=30)
             
             if cfst_results is None:
-                logger.warning("CFST failed, falling back to manual testing")
-                self.check_cf_ips_manual(cfips)
+                logger.error("CFST failed, no results to update")
                 return
             
             # Get top 30 IPs from CFST results
@@ -390,12 +379,9 @@ class CFAutoCheck:
             
             # Update API using ip_to_cfip mapping
             if self.enable_auto_update:
-                updated_ids = set()
-                
                 for ip_addr, cfip in self.ip_to_cfip.items():
                     ip_id = cfip.get('id')
                     original_addr = cfip.get('address')
-                    updated_ids.add(ip_id)
                     
                     result = ip_to_result.get(ip_addr)
                     
@@ -434,85 +420,6 @@ class CFAutoCheck:
             
         except Exception as e:
             logger.error(f"Error checking CF IPs: {str(e)}")
-
-
-    def check_cf_ips_manual(self, cfips):
-        """Fallback manual testing if CFST fails"""
-        results = []
-        
-        with ThreadPoolExecutor(max_workers=self.concurrent_tests) as executor:
-            futures = {executor.submit(self.test_cf_ip, ip): ip for ip in cfips}
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    if result:
-                        results.append(result)
-                except Exception as e:
-                    logger.error(f"Error in future result: {str(e)}")
-        
-        # Sort by latency
-        online_results = [r for r in results if r['latency'] and r['latency'] > 0]
-        online_results.sort(key=lambda x: x['latency'])
-        
-        # Keep top 30 enabled
-        top_count = 30
-        enabled_ids = set(r['id'] for r in online_results[:top_count])
-        
-        if self.enable_auto_update:
-            for result in results:
-                should_enable = result['id'] in enabled_ids
-                update_data = {
-                    'remark': result['remark'],
-                    'enabled': should_enable
-                }
-                self.api_client.update_cf_ip(result['id'], update_data)
-
-    def test_cf_ip(self, cfip):
-        """Test a single CF IP and return results dict"""
-        try:
-            address = cfip.get('address')
-            port = cfip.get('port', 443)
-            ip_id = cfip.get('id')
-            
-            logger.info(f"Testing CF IP: {address}:{port}")
-            
-            results = {
-                'id': ip_id,
-                'address': address,
-                'port': port,
-                'latency': None,
-                'speed': None,
-                'status': 'offline',
-                'remark': ''
-            }
-            
-            # Latency Test (Ping)
-            if self.enable_latency_test:
-                latency = self.tester.test_latency(address, port)
-                results['latency'] = latency
-                if latency > 0:
-                    results['status'] = 'online'
-            
-            # Speed Test
-            if self.enable_speed_test and results['status'] == 'online':
-                speed = self.tester.test_speed(address, port)
-                results['speed'] = speed
-            
-            # Geo Info
-            geo = self.tester.get_ip_location(address)
-            
-            # Format output
-            latency_str = f"{results['latency']:.2f}ms" if results['latency'] and results['latency'] > 0 else "N/A"
-            speed_mb = results['speed'] / 1024 / 1024 if results['speed'] else 0
-            
-            # Build remark
-            results['remark'] = f"{address} {geo['country']}|{geo['org']}|{latency_str}|{speed_mb:.2f}MB/S"
-            
-            return results
-                
-        except Exception as e:
-            logger.error(f"Error testing CF IP {cfip.get('address')}: {str(e)}")
-            return None
 
     def check_proxy_ips(self):
         pass

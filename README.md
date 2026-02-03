@@ -52,20 +52,12 @@ API_USE_SESSION_TOKEN=true  # Use session token for API authentication
 # Test Configuration
 CHECK_INTERVAL=3600         # Seconds between check cycles
 CONCURRENT_TESTS=5          # Number of parallel CFST tests
-TIMEOUT=5000                # Latency timeout (ms)
-TEST_URL=https://www.cloudflare.com/cdn-cgi/trace
 
 # Test Mode: cfip, proxyip, outbound, all
 TEST_MODE=cfip
 
-# Enable/Disable Features
-ENABLE_LATENCY_TEST=true
-ENABLE_SPEED_TEST=true
+# Enable/Disable Auto Update
 ENABLE_AUTO_UPDATE=true
-
-# Speed Test Configuration
-SPEED_TEST_SIZE=1048576     # 1MB
-SPEED_TEST_DURATION=10000   # 10s limit
 
 # Telegram Notification (optional)
 TG_ENABLED=false            # Set to true to enable
@@ -122,14 +114,14 @@ docker-compose up -d
 ```
 cf-auto-check/
 ├── src/
-│   ├── main.py        # Main entry point, CFST integration, and scheduler
-│   ├── tester.py      # Fallback latency (ping), speed, and geo tests
-│   ├── api_client.py  # API interaction logic
-│   ├── config.py      # Configuration loader
-│   └── logger.py      # Logging setup
-├── cfst_data/         # CFST binary and result files (auto-created)
-├── .env.example       # Example configuration file
-├── docker-compose.yml # Docker Compose configuration
-├── Dockerfile         # Docker build configuration
-└── requirements.txt   # Python dependencies
+│   ├── main.py              # Main entry point, CFST integration, and scheduler
+│   ├── api_client.py        # API interaction logic
+│   ├── telegram_notifier.py # Telegram notification service
+│   ├── config.py            # Configuration loader
+│   └── logger.py            # Logging setup
+├── cfst_data/               # CFST binary and result files (auto-created)
+├── .env.example             # Example configuration file
+├── docker-compose.yml       # Docker Compose configuration
+├── Dockerfile               # Docker build configuration
+└── requirements.txt         # Python dependencies
 ```
