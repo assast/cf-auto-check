@@ -164,7 +164,10 @@ class CFAutoCheck:
         import socket
         
         # Store mapping from IP to original cfip for later lookup
+        # Use list to handle multiple domains resolving to same IP
         self.ip_to_cfip = {}
+        # Track unresolved cfips for later
+        self.unresolved_cfips = []
         # Group IPs by port
         self.port_groups = {}
         
@@ -177,23 +180,67 @@ class CFAutoCheck:
                 socket.inet_aton(address)  # This is already an IP
                 ip_addr = address
             except socket.error:
-                # It's a domain, resolve it
-                try:
-                    ip_addr = socket.gethostbyname(address)
-                    logger.debug(f"Resolved {address} -> {ip_addr}")
-                except socket.gaierror:
-                    logger.debug(f"Could not resolve {address}, skipping")
+                # It's a domain, resolve it with multiple methods
+                ip_addr = self._resolve_domain(address)
+                if ip_addr is None:
+                    logger.warning(f"Could not resolve {address}, will be disabled")
+                    self.unresolved_cfips.append(cfip)
                     continue
+                logger.info(f"Resolved {address} -> {ip_addr}")
             
             # Group by port
             if port not in self.port_groups:
                 self.port_groups[port] = []
-            self.port_groups[port].append(ip_addr)
             
-            # Store mapping
-            self.ip_to_cfip[ip_addr] = cfip
+            # Avoid duplicate IPs in same port group
+            if ip_addr not in self.port_groups[port]:
+                self.port_groups[port].append(ip_addr)
+            
+            # Store mapping (IP -> cfip), prefer to keep existing mapping
+            if ip_addr not in self.ip_to_cfip:
+                self.ip_to_cfip[ip_addr] = cfip
         
-        logger.info(f"Grouped {len(self.ip_to_cfip)} IPs into {len(self.port_groups)} port groups")
+        logger.info(f"Grouped {len(self.ip_to_cfip)} IPs into {len(self.port_groups)} port groups, {len(self.unresolved_cfips)} unresolved")
+
+    def _resolve_domain(self, domain):
+        """Resolve domain using multiple methods"""
+        import socket
+        import subprocess
+        
+        # Method 1: Standard socket resolution
+        try:
+            ip = socket.gethostbyname(domain)
+            return ip
+        except socket.gaierror:
+            logger.debug(f"socket.gethostbyname failed for {domain}")
+        
+        # Method 2: Try with getaddrinfo
+        try:
+            results = socket.getaddrinfo(domain, None, socket.AF_INET)
+            if results:
+                return results[0][4][0]
+        except socket.gaierror:
+            logger.debug(f"socket.getaddrinfo failed for {domain}")
+        
+        # Method 3: Use system dig/nslookup command
+        for cmd in [['dig', '+short', domain], ['nslookup', domain]]:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        # Check if line is an IP address
+                        try:
+                            socket.inet_aton(line)
+                            return line
+                        except socket.error:
+                            continue
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+        
+        return None
+
 
     def run_cfst_for_port(self, port, ips, top_count):
         """Run CFST for a specific port group"""
@@ -375,11 +422,10 @@ class CFAutoCheck:
                     
                     self.api_client.update_cf_ip(ip_id, update_data)
                 
-                # Disable any cfips that weren't in ip_to_cfip (couldn't resolve)
-                for cfip in cfips:
-                    if cfip.get('id') not in updated_ids:
-                        self.api_client.update_cf_ip(cfip.get('id'), {'enabled': False})
-                        logger.info(f"Disabling {cfip.get('address')} (could not resolve)")
+                # Disable unresolved cfips
+                for cfip in self.unresolved_cfips:
+                    self.api_client.update_cf_ip(cfip.get('id'), {'enabled': False})
+                    logger.info(f"Disabling {cfip.get('address')} (could not resolve)")
             
             logger.info(f"CF IP checks completed. Top {len(top_ips)} IPs enabled.")
             
