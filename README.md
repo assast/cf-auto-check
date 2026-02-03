@@ -66,6 +66,12 @@ ENABLE_AUTO_UPDATE=true
 # Speed Test Configuration
 SPEED_TEST_SIZE=1048576     # 1MB
 SPEED_TEST_DURATION=10000   # 10s limit
+
+# Telegram Notification (optional)
+TG_ENABLED=false            # Set to true to enable
+TG_BOT_TOKEN=your-bot-token
+TG_CHAT_ID=your-chat-id
+TG_PROXY=                   # Proxy for TG only (doesn't affect speed test)
 ```
 
 ## Usage

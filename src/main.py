@@ -11,6 +11,7 @@ from .config import Config
 from .logger import logger
 from .api_client import ApiClient
 from .tester import Tester
+from .telegram_notifier import TelegramNotifier
 
 # Suppress InsecureRequestWarning
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -19,6 +20,7 @@ class CFAutoCheck:
     def __init__(self):
         self.api_client = ApiClient()
         self.tester = Tester()
+        self.telegram = TelegramNotifier()
         self.check_interval = Config.CHECK_INTERVAL
         self.concurrent_tests = Config.CONCURRENT_TESTS
         self.test_mode = Config.TEST_MODE
@@ -380,6 +382,9 @@ class CFAutoCheck:
                         logger.info(f"Disabling {cfip.get('address')} (could not resolve)")
             
             logger.info(f"CF IP checks completed. Top {len(top_ips)} IPs enabled.")
+            
+            # Send Telegram notification
+            self.telegram.send_cfip_results(cfst_results, top_count=30)
             
         except Exception as e:
             logger.error(f"Error checking CF IPs: {str(e)}")
