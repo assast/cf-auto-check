@@ -294,7 +294,7 @@ class CFAutoCheck:
             logger.error(f"Error running CFST for port {port}: {str(e)}")
             return None
 
-    def run_cfst(self, top_count=30):
+    def run_cfst(self, top_count=50):
         """Run CFST for all port groups and combine results"""
         all_results = []
         
@@ -365,14 +365,14 @@ class CFAutoCheck:
             self.export_ips_by_port(cfips)
             
             # Run CFST
-            cfst_results = self.run_cfst(top_count=30)
+            cfst_results = self.run_cfst(top_count=50)
             
             if cfst_results is None:
                 logger.error("CFST failed, no results to update")
                 return
             
-            # Get top 30 IPs from CFST results
-            top_ips = set(r['address'] for r in cfst_results[:30])
+            # Get top 50 IPs from CFST results
+            top_ips = set(r['address'] for r in cfst_results[:50])
             
             # Create mapping from resolved IP to CFST result
             ip_to_result = {r['address']: r for r in cfst_results}
@@ -416,7 +416,7 @@ class CFAutoCheck:
             logger.info(f"CF IP checks completed. Top {len(top_ips)} IPs enabled.")
             
             # Send Telegram notification
-            self.telegram.send_cfip_results(cfst_results, top_count=30)
+            self.telegram.send_cfip_results(cfst_results, top_count=50)
             
         except Exception as e:
             logger.error(f"Error checking CF IPs: {str(e)}")
