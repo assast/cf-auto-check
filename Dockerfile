@@ -10,4 +10,4 @@ RUN apt-get update && apt-get install -y iputils-ping && rm -rf /var/lib/apt/lis
 
 COPY . .
 
-CMD ["python", "src/main.py"]
+CMD ["python", "-m", "src.main"]
