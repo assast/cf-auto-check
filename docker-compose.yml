@@ -3,14 +3,9 @@ services:
     image: ghcr.io/assast/cf-auto-check:latest
     container_name: cf-auto-check
     restart: unless-stopped
+    network_mode: host
     env_file:
       - .env
     volumes:
       - ./logs:/app/logs
       - ./cfst_data:/app/cfst_data
-    networks:
-      - cf-network
-
-networks:
-  cf-network:
-    driver: bridge
