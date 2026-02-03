@@ -7,6 +7,8 @@ import subprocess
 import platform
 import urllib3
 import socket
+from datetime import datetime
+from croniter import croniter
 from .config import Config
 from .logger import logger
 from .api_client import ApiClient
@@ -19,7 +21,7 @@ class CFAutoCheck:
     def __init__(self):
         self.api_client = ApiClient()
         self.telegram = TelegramNotifier()
-        self.check_interval = Config.CHECK_INTERVAL
+        self.cron_expression = Config.CHECK_CRON
         self.concurrent_tests = Config.CONCURRENT_TESTS
         self.test_mode = Config.TEST_MODE
         self.enable_auto_update = Config.ENABLE_AUTO_UPDATE
@@ -43,18 +45,36 @@ class CFAutoCheck:
     def start(self):
         logger.info("CF Auto Check Service Started (Python + CFST)")
         logger.info(f"API URL: {Config.API_URL}")
-        logger.info(f"Check Interval: {self.check_interval}s")
+        logger.info(f"Cron Schedule: {self.cron_expression}")
         logger.info(f"Test Mode: {self.test_mode}")
         
+        # Run immediately on startup
+        try:
+            self.run_check()
+        except Exception as e:
+            logger.error(f"Unexpected error in initial check: {str(e)}")
+        
+        # Then wait for cron schedule
+        cron = croniter(self.cron_expression, datetime.now())
+        
         while self.running:
-            try:
-                self.run_check()
-            except Exception as e:
-                logger.error(f"Unexpected error in main loop: {str(e)}")
+            next_run = cron.get_next(datetime)
+            wait_seconds = (next_run - datetime.now()).total_seconds()
+            
+            if wait_seconds > 0:
+                logger.info(f"Next check scheduled at: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_seconds:.0f}s)")
+                
+                # Sleep in small intervals to allow for graceful shutdown
+                while wait_seconds > 0 and self.running:
+                    sleep_time = min(wait_seconds, 60)  # Check every minute
+                    time.sleep(sleep_time)
+                    wait_seconds -= sleep_time
             
             if self.running:
-                logger.info(f"Waiting {self.check_interval}s before next check...")
-                time.sleep(self.check_interval)
+                try:
+                    self.run_check()
+                except Exception as e:
+                    logger.error(f"Unexpected error in main loop: {str(e)}")
 
     def run_check(self):
         logger.info("Starting check cycle...")

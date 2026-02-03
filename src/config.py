@@ -14,8 +14,11 @@ class Config:
     API_RETRY_DELAY = int(os.getenv('API_RETRY_DELAY', 2000))  # ms
     API_USE_SESSION_TOKEN = os.getenv('API_USE_SESSION_TOKEN', 'true').lower() == 'true'
     
-    # Test Configuration
-    CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', 3600))  # seconds
+    # Schedule Configuration (cron expression)
+    # Default: every hour at minute 0 (0 * * * *)
+    CHECK_CRON = os.getenv('CHECK_CRON', '0 * * * *')
+    
+    # CFST Configuration
     CONCURRENT_TESTS = int(os.getenv('CONCURRENT_TESTS', 5))
     
     # Test Mode: cfip, proxyip, outbound, all

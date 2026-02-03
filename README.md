@@ -47,11 +47,13 @@ API_KEY=your-api-key-here
 # API Client Configuration
 API_MAX_RETRIES=3
 API_RETRY_DELAY=2000
-API_USE_SESSION_TOKEN=true  # Use session token for API authentication
+API_USE_SESSION_TOKEN=true
 
-# Test Configuration
-CHECK_INTERVAL=3600         # Seconds between check cycles
-CONCURRENT_TESTS=5          # Number of parallel CFST tests
+# Schedule Configuration (cron expression)
+CHECK_CRON=0 * * * *          # Every hour at minute 0
+
+# CFST Configuration
+CONCURRENT_TESTS=5
 
 # Test Mode: cfip, proxyip, outbound, all
 TEST_MODE=cfip
@@ -60,10 +62,10 @@ TEST_MODE=cfip
 ENABLE_AUTO_UPDATE=true
 
 # Telegram Notification (optional)
-TG_ENABLED=false            # Set to true to enable
+TG_ENABLED=false
 TG_BOT_TOKEN=your-bot-token
 TG_CHAT_ID=your-chat-id
-TG_PROXY=                   # Proxy for TG only (doesn't affect speed test)
+TG_PROXY=                     # Proxy for TG only
 ```
 
 ## Usage
