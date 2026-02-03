@@ -1,6 +1,6 @@
 services:
   cf-auto-check:
-    build: .
+    image: ghcr.io/assast/cf-auto-check:latest
     container_name: cf-auto-check
     restart: unless-stopped
     env_file:
