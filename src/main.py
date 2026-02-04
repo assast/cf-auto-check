@@ -327,10 +327,16 @@ class CFAutoCheck:
         if not all_results:
             return None
         
-        # Sort all results by latency and return top N
-        all_results.sort(key=lambda x: x['latency'] if x['latency'] > 0 else float('inf'))
-        
-        logger.info(f"Total {len(all_results)} results from all ports, keeping top {top_count}")
+        # Sort all results based on SORT_MODE
+        sort_mode = Config.SORT_MODE
+        if sort_mode == 'latency':
+            # Sort by latency (ascending, lower is better)
+            all_results.sort(key=lambda x: x['latency'] if x['latency'] > 0 else float('inf'))
+            logger.info(f"Total {len(all_results)} results from all ports, keeping top {top_count} by latency")
+        else:
+            # Sort by download speed (descending, higher is better) - default
+            all_results.sort(key=lambda x: x['speed'], reverse=True)
+            logger.info(f"Total {len(all_results)} results from all ports, keeping top {top_count} by download speed")
         return all_results[:top_count]
 
     def parse_cfst_results(self, result_file=None):

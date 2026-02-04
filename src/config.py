@@ -21,6 +21,9 @@ class Config:
     # CFST Configuration
     CONCURRENT_TESTS = int(os.getenv('CONCURRENT_TESTS', 5))
     
+    # Sort Mode: speed (download speed, default) or latency
+    SORT_MODE = os.getenv('SORT_MODE', 'speed').lower()
+    
     # Test Mode: cfip, proxyip, outbound, all
     TEST_MODE = os.getenv('TEST_MODE', 'cfip')
     
