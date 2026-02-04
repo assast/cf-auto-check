@@ -364,6 +364,22 @@ class CFAutoCheck:
         
         return None
 
+    def _get_ip_info(self, ip_addr):
+        """Get IP information from ipapi.is API"""
+        try:
+            import requests
+            response = requests.get(f'https://api.ipapi.is/?q={ip_addr}', timeout=10)
+            if response.ok:
+                data = response.json()
+                return {
+                    'country': data.get('location', {}).get('country_code') or 'N/A',
+                    'city': data.get('location', {}).get('city') or 'N/A',
+                    'isp': data.get('asn', {}).get('org') or 'N/A',
+                    'asn': f"AS{data.get('asn', {}).get('asn')}" if data.get('asn', {}).get('asn') else 'N/A'
+                }
+        except Exception as e:
+            logger.debug(f"Failed to get IP info for {ip_addr}: {str(e)}")
+        return None
 
     def run_cfst_for_port(self, port, ips, top_count):
         """Run CFST for a specific port group"""
@@ -525,31 +541,63 @@ class CFAutoCheck:
                     
                     if result:
                         should_enable = ip_addr in top_ips
-                        latency_str = f"{result['latency']:.2f}ms"
-                        speed_str = f"{result['speed']:.2f}MB/s"
-                        region = result['region'] or 'Unknown'
+                        latency_val = result['latency']  # ms
+                        speed_val = result['speed'] * 1024  # Convert MB/s to KB/s for API
                         
-                        remark = f"{region}|{latency_str}|{speed_str} {original_addr}"
+                        # Get IP info from ipapi.is
+                        ip_info = self._get_ip_info(ip_addr)
+                        if ip_info:
+                            country = ip_info['country']
+                            isp = ip_info['isp']
+                        else:
+                            country = result['region'] or 'N/A'
+                            isp = 'N/A'
+                        
+                        # Build remark: 速度|延迟|地区 原始地址
+                        speed_str = f"{result['speed']:.2f}MB/s"
+                        latency_str = f"{latency_val:.2f}ms"
+                        remark = f"{speed_str}|{latency_str}|{country} {original_addr}"
+                        
                         update_data = {
                             'remark': remark,
-                            'enabled': should_enable
+                            'enabled': should_enable,
+                            'latency': round(latency_val, 2),
+                            'speed': round(speed_val, 2),
+                            'country': country,
+                            'isp': isp
                         }
                         
                         status_str = "enabled" if should_enable else "disabled"
-                        logger.info(f"Updating {original_addr}: {latency_str}, {speed_str} ({status_str})")
+                        logger.info(f"Updating {original_addr}: {latency_str}, {speed_str}, {country} ({status_str})")
                     else:
-                        # IP not in CFST results (failed test), disable it
+                        # IP not in CFST results (failed test), disable it and update with N/A
+                        remark = f"N/A|N/A|N/A {original_addr}"
                         update_data = {
-                            'enabled': False
+                            'remark': remark,
+                            'enabled': False,
+                            'latency': 0,
+                            'speed': 0,
+                            'country': 'N/A',
+                            'isp': 'N/A'
                         }
                         logger.info(f"Disabling {original_addr} (not in CFST results)")
                     
                     self.api_client.update_cf_ip(ip_id, update_data)
                 
-                # Disable unresolved cfips
+                # Disable unresolved cfips and update with N/A
                 for cfip in self.unresolved_cfips:
-                    self.api_client.update_cf_ip(cfip.get('id'), {'enabled': False})
-                    logger.info(f"Disabling {cfip.get('address')} (could not resolve)")
+                    original_addr = cfip.get('address')
+                    remark = f"N/A|N/A|N/A {original_addr}"
+                    update_data = {
+                        'remark': remark,
+                        'enabled': False,
+                        'latency': 0,
+                        'speed': 0,
+                        'country': 'N/A',
+                        'isp': 'N/A'
+                    }
+                    self.api_client.update_cf_ip(cfip.get('id'), update_data)
+                    logger.info(f"Disabling {original_addr} (could not resolve)")
             
             logger.info(f"CF IP checks completed. Top {len(top_ips)} IPs enabled.")
             
