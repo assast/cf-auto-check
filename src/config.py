@@ -28,10 +28,14 @@ class Config:
     
     # CFST Configuration
     CONCURRENT_TESTS = int(os.getenv('CONCURRENT_TESTS', 5))
-    
+
+    # Two-stage testing configuration
+    LATENCY_TEST_COUNT = int(os.getenv('LATENCY_TEST_COUNT', 100))  # Test top N IPs by latency for speed
+    SPEED_ENABLE_COUNT = int(os.getenv('SPEED_ENABLE_COUNT', 50))   # Enable top N IPs by speed
+
     # Sort Mode: speed (download speed, default) or latency
     SORT_MODE = os.getenv('SORT_MODE', 'speed').lower()
-    
+
     # Test Mode: cfip, proxyip, outbound, all
     TEST_MODE = os.getenv('TEST_MODE', 'cfip')
     

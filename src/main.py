@@ -33,6 +33,8 @@ class CFAutoCheck:
         self.enable_api_trigger = Config.ENABLE_API_TRIGGER
         self.api_trigger_key = Config.API_TRIGGER_KEY
         self.api_trigger_port = Config.API_TRIGGER_PORT
+        self.latency_test_count = Config.LATENCY_TEST_COUNT
+        self.speed_enable_count = Config.SPEED_ENABLE_COUNT
         
         self.running = True
         self.check_running = False  # Flag to prevent concurrent checks
@@ -381,34 +383,50 @@ class CFAutoCheck:
             logger.debug(f"Failed to get IP info for {ip_addr}: {str(e)}")
         return None
 
-    def run_cfst_for_port(self, port, ips, top_count):
-        """Run CFST for a specific port group"""
+    def run_cfst_for_port(self, port, ips, test_mode='latency_only', download_count=0):
+        """Run CFST for a specific port group
+
+        Args:
+            port: Port number
+            ips: List of IP addresses
+            test_mode: 'latency_only' or 'full' (latency + speed)
+            download_count: Number of IPs to test download speed (0 for latency only)
+        """
         if not self.check_cfst_binary():
             return None
-        
+
         # Write IPs to temp file for this port
         port_ips_file = os.path.join(self.cfst_dir, f'ips_{port}.txt')
         with open(port_ips_file, 'w') as f:
             for ip in ips:
                 f.write(f"{ip}\n")
-        
+
         port_result_file = os.path.join(self.cfst_dir, f'result_{port}.csv')
-        
-        # Run CFST with port-specific parameters, showing output in console
+
+        # Build CFST command
         cmd = [
             self.cfst_path,
             '-f', port_ips_file,
             '-o', port_result_file,
-            '-tp', str(port),  # Specify port
-            '-url', 'https://download.parallels.com/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg',
-            '-dn', str(top_count),
+            '-tp', str(port),
             '-n', str(self.concurrent_tests),
-            '-p', str(top_count),  # Show results in console
-            '-debug'
         ]
-        
-        logger.info(f"Running CFST for port {port}: {' '.join(cmd)}")
-        
+
+        if test_mode == 'latency_only':
+            # Only test latency, no download speed test
+            cmd.extend(['-dn', '0'])
+            logger.info(f"Running CFST (latency only) for port {port} with {len(ips)} IPs")
+        else:
+            # Full test with download speed
+            cmd.extend([
+                '-url', 'https://download.parallels.com/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg',
+                '-dn', str(download_count),
+                '-p', str(download_count),
+            ])
+            logger.info(f"Running CFST (full test) for port {port} with {len(ips)} IPs")
+
+        cmd.append('-debug')
+
         try:
             # Use Popen to stream output in real-time
             process = subprocess.Popen(
@@ -419,21 +437,21 @@ class CFAutoCheck:
                 text=True,
                 bufsize=1
             )
-            
+
             # Stream output line by line
             for line in process.stdout:
                 line = line.strip()
                 if line:
                     print(f"[CFST:{port}] {line}")
-            
+
             process.wait(timeout=600)
-            
+
             if process.returncode != 0:
                 logger.error(f"CFST failed for port {port} with exit code {process.returncode}")
                 return None
-            
+
             return self.parse_cfst_results(port_result_file)
-            
+
         except subprocess.TimeoutExpired:
             process.kill()
             logger.error(f"CFST timed out for port {port}")
@@ -442,30 +460,78 @@ class CFAutoCheck:
             logger.error(f"Error running CFST for port {port}: {str(e)}")
             return None
 
-    def run_cfst(self, top_count=50):
-        """Run CFST for all port groups and combine results"""
-        all_results = []
-        
+    def run_cfst(self):
+        """Run CFST with two-stage testing:
+        Stage 1: Test latency for all IPs
+        Stage 2: Test speed for top N IPs by latency
+        """
+        # Stage 1: Latency test for all IPs
+        logger.info("=" * 60)
+        logger.info("Stage 1: Testing latency for all IPs")
+        logger.info("=" * 60)
+
+        all_latency_results = []
+
         for port, ips in self.port_groups.items():
-            logger.info(f"Testing {len(ips)} IPs on port {port}")
-            results = self.run_cfst_for_port(port, ips, len(ips))  # Get all results for this port
+            logger.info(f"Testing latency for {len(ips)} IPs on port {port}")
+            results = self.run_cfst_for_port(port, ips, test_mode='latency_only')
             if results:
-                all_results.extend(results)
-        
-        if not all_results:
+                # Add port info to each result
+                for r in results:
+                    r['port'] = port
+                all_latency_results.extend(results)
+
+        if not all_latency_results:
+            logger.error("Stage 1 failed: No latency results")
             return None
-        
-        # Sort all results based on SORT_MODE
-        sort_mode = Config.SORT_MODE
-        if sort_mode == 'latency':
-            # Sort by latency (ascending, lower is better)
-            all_results.sort(key=lambda x: x['latency'] if x['latency'] > 0 else float('inf'))
-            logger.info(f"Total {len(all_results)} results from all ports, keeping top {top_count} by latency")
-        else:
-            # Sort by download speed (descending, higher is better) - default
-            all_results.sort(key=lambda x: x['speed'], reverse=True)
-            logger.info(f"Total {len(all_results)} results from all ports, keeping top {top_count} by download speed")
-        return all_results[:top_count]
+
+        # Sort by latency (ascending, lower is better)
+        all_latency_results.sort(key=lambda x: x['latency'] if x['latency'] > 0 else float('inf'))
+
+        logger.info(f"Stage 1 completed: {len(all_latency_results)} IPs tested")
+        logger.info(f"Top 10 by latency:")
+        for i, r in enumerate(all_latency_results[:10], 1):
+            logger.info(f"  {i}. {r['address']} - {r['latency']:.2f}ms (port {r.get('port', 'N/A')})")
+
+        # Stage 2: Speed test for top N IPs by latency
+        top_by_latency = all_latency_results[:self.latency_test_count]
+
+        logger.info("=" * 60)
+        logger.info(f"Stage 2: Testing speed for top {len(top_by_latency)} IPs by latency")
+        logger.info("=" * 60)
+
+        # Group top IPs by port for speed testing
+        speed_test_groups = {}
+        for result in top_by_latency:
+            port = result.get('port', 443)
+            if port not in speed_test_groups:
+                speed_test_groups[port] = []
+            speed_test_groups[port].append(result['address'])
+
+        all_speed_results = []
+
+        for port, ips in speed_test_groups.items():
+            logger.info(f"Testing speed for {len(ips)} IPs on port {port}")
+            results = self.run_cfst_for_port(port, ips, test_mode='full', download_count=len(ips))
+            if results:
+                # Add port info to each result
+                for r in results:
+                    r['port'] = port
+                all_speed_results.extend(results)
+
+        if not all_speed_results:
+            logger.error("Stage 2 failed: No speed results")
+            return None
+
+        # Sort by download speed (descending, higher is better)
+        all_speed_results.sort(key=lambda x: x['speed'], reverse=True)
+
+        logger.info(f"Stage 2 completed: {len(all_speed_results)} IPs tested")
+        logger.info(f"Top 10 by speed:")
+        for i, r in enumerate(all_speed_results[:10], 1):
+            logger.info(f"  {i}. {r['address']} - {r['speed']:.2f}MB/s, {r['latency']:.2f}ms (port {r.get('port', 'N/A')})")
+
+        return all_speed_results
 
     def parse_cfst_results(self, result_file=None):
         """Parse CFST result.csv file"""
@@ -508,42 +574,44 @@ class CFAutoCheck:
         try:
             logger.info("Fetching CF IPs...")
             cfips = self.api_client.get_cf_ips()
-            
+
             if not cfips:
                 logger.warning("No CF IPs found")
                 return
-                
+
             logger.info(f"Found {len(cfips)} CF IPs")
-            
+
             # Group IPs by port (this also populates self.ip_to_cfip)
             self.export_ips_by_port(cfips)
-            
-            # Run CFST
-            cfst_results = self.run_cfst(top_count=50)
-            
+
+            # Run two-stage CFST testing
+            cfst_results = self.run_cfst()
+
             if cfst_results is None:
                 logger.error("CFST failed, no results to update")
                 return
-            
-            # Get top 50 IPs from CFST results
-            top_ips = set(r['address'] for r in cfst_results[:50])
-            
+
+            # Get top N IPs by speed to enable
+            top_ips = set(r['address'] for r in cfst_results[:self.speed_enable_count])
+
+            logger.info(f"Enabling top {len(top_ips)} IPs by download speed")
+
             # Create mapping from resolved IP to CFST result
             ip_to_result = {r['address']: r for r in cfst_results}
-            
+
             # Update API using ip_to_cfip mapping
             if self.enable_auto_update:
                 for ip_addr, cfip in self.ip_to_cfip.items():
                     ip_id = cfip.get('id')
                     original_addr = cfip.get('address')
-                    
+
                     result = ip_to_result.get(ip_addr)
-                    
+
                     if result:
                         should_enable = ip_addr in top_ips
                         latency_val = result['latency']  # ms
                         speed_val = result['speed'] * 1024  # Convert MB/s to KB/s for API
-                        
+
                         # Get IP info from ipapi.is
                         ip_info = self._get_ip_info(ip_addr)
                         if ip_info:
@@ -552,12 +620,12 @@ class CFAutoCheck:
                         else:
                             country = result['region'] or 'N/A'
                             isp = 'N/A'
-                        
+
                         # Build remark: 速度|延迟|地区 原始地址
                         speed_str = f"{result['speed']:.2f}MB/s"
                         latency_str = f"{latency_val:.2f}ms"
                         remark = f"{speed_str}|{latency_str}|{country} {original_addr}"
-                        
+
                         update_data = {
                             'remark': remark,
                             'enabled': should_enable,
@@ -566,7 +634,7 @@ class CFAutoCheck:
                             'country': country,
                             'isp': isp
                         }
-                        
+
                         status_str = "enabled" if should_enable else "disabled"
                         logger.info(f"Updating {original_addr}: {latency_str}, {speed_str}, {country} ({status_str})")
                     else:
@@ -581,9 +649,9 @@ class CFAutoCheck:
                             'isp': 'N/A'
                         }
                         logger.info(f"Disabling {original_addr} (not in CFST results)")
-                    
+
                     self.api_client.update_cf_ip(ip_id, update_data)
-                
+
                 # Disable unresolved cfips and update with N/A
                 for cfip in self.unresolved_cfips:
                     original_addr = cfip.get('address')
@@ -598,12 +666,12 @@ class CFAutoCheck:
                     }
                     self.api_client.update_cf_ip(cfip.get('id'), update_data)
                     logger.info(f"Disabling {original_addr} (could not resolve)")
-            
+
             logger.info(f"CF IP checks completed. Top {len(top_ips)} IPs enabled.")
-            
+
             # Send Telegram notification
-            self.telegram.send_cfip_results(cfst_results, top_count=50)
-            
+            self.telegram.send_cfip_results(cfst_results, top_count=self.speed_enable_count)
+
         except Exception as e:
             logger.error(f"Error checking CF IPs: {str(e)}")
 
