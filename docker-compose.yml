@@ -3,7 +3,8 @@ services:
     image: ghcr.io/assast/cf-auto-check:latest
     container_name: cf-auto-check
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "58766:8080"
     env_file:
       - .env
     volumes:
