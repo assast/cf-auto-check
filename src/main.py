@@ -529,7 +529,7 @@ class CFAutoCheck:
                         speed_str = f"{result['speed']:.2f}MB/s"
                         region = result['region'] or 'Unknown'
                         
-                        remark = f"{original_addr} {region}|{latency_str}|{speed_str}"
+                        remark = f"{region}|{latency_str}|{speed_str} {original_addr}"
                         update_data = {
                             'remark': remark,
                             'enabled': should_enable
