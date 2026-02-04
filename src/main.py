@@ -33,7 +33,7 @@ class CFAutoCheck:
         self.enable_api_trigger = Config.ENABLE_API_TRIGGER
         self.api_trigger_key = Config.API_TRIGGER_KEY
         self.api_trigger_port = Config.API_TRIGGER_PORT
-        self.latency_test_count = Config.LATENCY_TEST_COUNT
+        self.speed_test_count = Config.SPEED_TEST_COUNT
         self.speed_enable_count = Config.SPEED_ENABLE_COUNT
         
         self.running = True
@@ -383,14 +383,13 @@ class CFAutoCheck:
             logger.debug(f"Failed to get IP info for {ip_addr}: {str(e)}")
         return None
 
-    def run_cfst_for_port(self, port, ips, test_mode='latency_only', download_count=0):
+    def run_cfst_for_port(self, port, ips, download_count):
         """Run CFST for a specific port group
 
         Args:
             port: Port number
             ips: List of IP addresses
-            test_mode: 'latency_only' or 'full' (latency + speed)
-            download_count: Number of IPs to test download speed (0 for latency only)
+            download_count: Number of IPs to test download speed (CFST -dn parameter)
         """
         if not self.check_cfst_binary():
             return None
@@ -410,22 +409,13 @@ class CFAutoCheck:
             '-o', port_result_file,
             '-tp', str(port),
             '-n', str(self.concurrent_tests),
+            '-url', 'https://download.parallels.com/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg',
+            '-dn', str(download_count),
+            '-p', str(download_count),
+            '-debug'
         ]
 
-        if test_mode == 'latency_only':
-            # Only test latency, no download speed test
-            cmd.extend(['-dn', '0'])
-            logger.info(f"Running CFST (latency only) for port {port} with {len(ips)} IPs")
-        else:
-            # Full test with download speed
-            cmd.extend([
-                '-url', 'https://download.parallels.com/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg',
-                '-dn', str(download_count),
-                '-p', str(download_count),
-            ])
-            logger.info(f"Running CFST (full test) for port {port} with {len(ips)} IPs")
-
-        cmd.append('-debug')
+        logger.info(f"Running CFST for port {port} with {len(ips)} IPs (download test: {download_count} IPs)")
 
         try:
             # Use Popen to stream output in real-time
@@ -461,77 +451,35 @@ class CFAutoCheck:
             return None
 
     def run_cfst(self):
-        """Run CFST with two-stage testing:
-        Stage 1: Test latency for all IPs
-        Stage 2: Test speed for top N IPs by latency
-        """
-        # Stage 1: Latency test for all IPs
+        """Run CFST: test latency for all IPs, then test speed for top N by latency"""
         logger.info("=" * 60)
-        logger.info("Stage 1: Testing latency for all IPs")
+        logger.info(f"Running CFST (download test: top {self.speed_test_count} IPs by latency)")
         logger.info("=" * 60)
 
-        all_latency_results = []
+        all_results = []
 
         for port, ips in self.port_groups.items():
-            logger.info(f"Testing latency for {len(ips)} IPs on port {port}")
-            results = self.run_cfst_for_port(port, ips, test_mode='latency_only')
+            logger.info(f"Testing {len(ips)} IPs on port {port}")
+            results = self.run_cfst_for_port(port, ips, download_count=self.speed_test_count)
             if results:
                 # Add port info to each result
                 for r in results:
                     r['port'] = port
-                all_latency_results.extend(results)
+                all_results.extend(results)
 
-        if not all_latency_results:
-            logger.error("Stage 1 failed: No latency results")
-            return None
-
-        # Sort by latency (ascending, lower is better)
-        all_latency_results.sort(key=lambda x: x['latency'] if x['latency'] > 0 else float('inf'))
-
-        logger.info(f"Stage 1 completed: {len(all_latency_results)} IPs tested")
-        logger.info(f"Top 10 by latency:")
-        for i, r in enumerate(all_latency_results[:10], 1):
-            logger.info(f"  {i}. {r['address']} - {r['latency']:.2f}ms (port {r.get('port', 'N/A')})")
-
-        # Stage 2: Speed test for top N IPs by latency
-        top_by_latency = all_latency_results[:self.latency_test_count]
-
-        logger.info("=" * 60)
-        logger.info(f"Stage 2: Testing speed for top {len(top_by_latency)} IPs by latency")
-        logger.info("=" * 60)
-
-        # Group top IPs by port for speed testing
-        speed_test_groups = {}
-        for result in top_by_latency:
-            port = result.get('port', 443)
-            if port not in speed_test_groups:
-                speed_test_groups[port] = []
-            speed_test_groups[port].append(result['address'])
-
-        all_speed_results = []
-
-        for port, ips in speed_test_groups.items():
-            logger.info(f"Testing speed for {len(ips)} IPs on port {port}")
-            results = self.run_cfst_for_port(port, ips, test_mode='full', download_count=len(ips))
-            if results:
-                # Add port info to each result
-                for r in results:
-                    r['port'] = port
-                all_speed_results.extend(results)
-
-        if not all_speed_results:
-            logger.error("Stage 2 failed: No speed results")
+        if not all_results:
+            logger.error("CFST failed: No results")
             return None
 
         # Sort by download speed (descending, higher is better)
-        all_speed_results.sort(key=lambda x: x['speed'], reverse=True)
+        all_results.sort(key=lambda x: x['speed'], reverse=True)
 
-        logger.info(f"Stage 2 completed: {len(all_speed_results)} IPs tested")
+        logger.info(f"CFST completed: {len(all_results)} IPs tested")
         logger.info(f"Top 10 by speed:")
-        for i, r in enumerate(all_speed_results[:10], 1):
+        for i, r in enumerate(all_results[:10], 1):
             logger.info(f"  {i}. {r['address']} - {r['speed']:.2f}MB/s, {r['latency']:.2f}ms (port {r.get('port', 'N/A')})")
 
-        return all_speed_results
+        return all_results
 
     def parse_cfst_results(self, result_file=None):
         """Parse CFST result.csv file"""
@@ -584,7 +532,7 @@ class CFAutoCheck:
             # Group IPs by port (this also populates self.ip_to_cfip)
             self.export_ips_by_port(cfips)
 
-            # Run two-stage CFST testing
+            # Run CFST testing
             cfst_results = self.run_cfst()
 
             if cfst_results is None:

@@ -5,7 +5,7 @@ Cloudflare IP/Domain latency and speed testing service, rewritten in Python with
 ## Features
 
 - **CFST Integration**: Uses CloudflareSpeedTest binary for accurate latency and speed testing.
-- **Two-Stage Testing**: First tests latency for all IPs, then tests speed for top N by latency.
+- **Smart Testing**: CFST tests latency for all IPs, then tests speed for top N by latency (configurable via SPEED_TEST_COUNT).
 - **Auto Download**: Automatically downloads the correct CFST binary for your platform.
 - **Multi-Port Support**: Groups IPs by port and tests each group separately.
 - **Check Interval**: Configurable interval for periodic IP checks.
@@ -56,8 +56,8 @@ CHECK_CRON=0 * * * *          # Every hour at minute 0
 # CFST Configuration
 CONCURRENT_TESTS=5
 
-# Two-stage testing: first test latency for all IPs, then test speed for top N by latency
-LATENCY_TEST_COUNT=100    # Test top N IPs by latency for speed testing
+# Download speed test configuration
+SPEED_TEST_COUNT=20       # Number of IPs to test download speed (CFST -dn parameter)
 SPEED_ENABLE_COUNT=50     # Enable top N IPs by download speed
 
 # Test Mode: cfip, proxyip, outbound, all

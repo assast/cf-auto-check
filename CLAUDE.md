@@ -67,24 +67,21 @@ docker-compose up -d
 
 ### 关键工作流程
 
-#### IP 检测流程 (check_cf_ips) - 两阶段测试
+#### IP 检测流程 (check_cf_ips)
 1. 从 API 获取 CF IP 列表
 2. 域名解析：将域名解析为 IP 地址（使用多种方法确保成功）
 3. 按端口分组：将 IP 按端口分组（支持多端口测试）
-4. **阶段 1 - 延迟测试**：
-   - 对所有 IP 运行 CFST 延迟测试（不测速度）
-   - 按延迟排序（升序，越低越好）
-   - 选择延迟最低的前 N 个 IP（N = LATENCY_TEST_COUNT，默认 100）
-5. **阶段 2 - 速度测试**：
-   - 对阶段 1 选出的 IP 运行完整测试（延迟 + 速度）
+4. **CFST 测试**：
+   - 对所有 IP 运行 CFST 测试（延迟 + 速度）
+   - CFST 会先测试所有 IP 的延迟，然后对延迟最低的前 N 个 IP 进行速度测试（N = SPEED_TEST_COUNT）
    - 按下载速度排序（降序，越高越好）
-   - 选择速度最高的前 M 个 IP（M = SPEED_ENABLE_COUNT，默认 50）
-6. 更新 API：
+   - 选择速度最高的前 M 个 IP（M = SPEED_ENABLE_COUNT）
+5. 更新 API：
    - Top M 个 IP 设置为 enabled
    - 其他 IP 设置为 disabled
    - 更新 remark 格式：`速度|延迟|地区 原始地址`
    - 获取 IP 地理信息（使用 ipapi.is API）
-7. 发送 Telegram 通知
+6. 发送 Telegram 通知
 
 #### CFST 集成
 - 自动检测平台（macOS/Linux，ARM/AMD64）
@@ -115,20 +112,16 @@ docker-compose up -d
 - `TEST_MODE=outbound` - 仅测试出站
 - `TEST_MODE=all` - 测试所有类型
 
-#### 两阶段测试配置
-- `LATENCY_TEST_COUNT=100` - 阶段 1 选择延迟最低的前 N 个 IP 进行速度测试
-- `SPEED_ENABLE_COUNT=50` - 阶段 2 选择速度最高的前 M 个 IP 设为启用状态
-
-#### 排序模式（已废弃，现在使用两阶段测试）
-- `SORT_MODE=speed` - 按下载速度排序（默认）
-- `SORT_MODE=latency` - 按延迟排序
+#### 测试配置
+- `SPEED_TEST_COUNT=20` - CFST 下载测速数量（-dn 参数），CFST 会先测试所有 IP 的延迟，然后对延迟最低的前 N 个 IP 进行速度测试
+- `SPEED_ENABLE_COUNT=50` - 选择速度最高的前 M 个 IP 设为启用状态
 
 ### 重要实现细节
 
-1. **两阶段测试策略**：
-   - 阶段 1：对所有 IP 进行快速延迟测试（`-dn 0` 不测速度）
-   - 阶段 2：仅对延迟最低的前 N 个 IP 进行完整测试（延迟 + 速度）
-   - 优势：大幅减少测试时间，避免对高延迟 IP 进行无意义的速度测试
+1. **CFST 测试策略**：
+   - CFST 内部会先测试所有 IP 的延迟，然后按延迟排序
+   - 对延迟最低的前 N 个 IP 进行速度测试（N 由 SPEED_TEST_COUNT 控制，对应 CFST 的 -dn 参数）
+   - 最终按速度排序，选择速度最高的前 M 个 IP 设为启用（M 由 SPEED_ENABLE_COUNT 控制）
 
 2. **域名解析策略**：使用三种方法确保域名解析成功
    - socket.gethostbyname
@@ -145,7 +138,7 @@ docker-compose up -d
 
 7. **速度单位转换**：CFST 返回 MB/s，API 需要 KB/s（乘以 1024）
 
-8. **端口信息保留**：在两阶段测试中，每个结果都保留端口信息，确保阶段 2 能正确按端口分组
+8. **端口信息保留**：每个结果都保留端口信息，确保能正确按端口分组
 
 ### 文件结构
 ```
