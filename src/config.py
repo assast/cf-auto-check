@@ -18,6 +18,14 @@ class Config:
     # Default: every hour at minute 0 (0 * * * *)
     CHECK_CRON = os.getenv('CHECK_CRON', '0 * * * *')
     
+    # Enable/Disable Cron Scheduler (background scheduled checks)
+    ENABLE_CRON_SCHEDULER = os.getenv('ENABLE_CRON_SCHEDULER', 'true').lower() == 'true'
+    
+    # API Trigger Configuration
+    ENABLE_API_TRIGGER = os.getenv('ENABLE_API_TRIGGER', 'false').lower() == 'true'
+    API_TRIGGER_KEY = os.getenv('API_TRIGGER_KEY', '')
+    API_TRIGGER_PORT = int(os.getenv('API_TRIGGER_PORT', 8080))
+    
     # CFST Configuration
     CONCURRENT_TESTS = int(os.getenv('CONCURRENT_TESTS', 5))
     

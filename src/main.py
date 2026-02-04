@@ -7,6 +7,10 @@ import subprocess
 import platform
 import urllib3
 import socket
+import threading
+import json
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 from croniter import croniter
 from .config import Config
@@ -25,8 +29,13 @@ class CFAutoCheck:
         self.concurrent_tests = Config.CONCURRENT_TESTS
         self.test_mode = Config.TEST_MODE
         self.enable_auto_update = Config.ENABLE_AUTO_UPDATE
+        self.enable_cron_scheduler = Config.ENABLE_CRON_SCHEDULER
+        self.enable_api_trigger = Config.ENABLE_API_TRIGGER
+        self.api_trigger_key = Config.API_TRIGGER_KEY
+        self.api_trigger_port = Config.API_TRIGGER_PORT
         
         self.running = True
+        self.check_running = False  # Flag to prevent concurrent checks
         self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.cfst_dir = os.path.join(self.base_dir, 'cfst_data')
         self.cfst_path = os.path.join(self.cfst_dir, 'cfst')
@@ -45,50 +54,153 @@ class CFAutoCheck:
     def start(self):
         logger.info("CF Auto Check Service Started (Python + CFST)")
         logger.info(f"API URL: {Config.API_URL}")
-        logger.info(f"Cron Schedule: {self.cron_expression}")
+        logger.info(f"Cron Scheduler: {'Enabled' if self.enable_cron_scheduler else 'Disabled'}")
+        logger.info(f"API Trigger: {'Enabled on port ' + str(self.api_trigger_port) if self.enable_api_trigger else 'Disabled'}")
         logger.info(f"Test Mode: {self.test_mode}")
         
-        # Run immediately on startup
-        try:
-            self.run_check()
-        except Exception as e:
-            logger.error(f"Unexpected error in initial check: {str(e)}")
+        # Start API server if enabled
+        if self.enable_api_trigger:
+            api_thread = threading.Thread(target=self._run_api_server, daemon=True)
+            api_thread.start()
         
-        # Then wait for cron schedule
-        cron = croniter(self.cron_expression, datetime.now())
-        
-        while self.running:
-            next_run = cron.get_next(datetime)
-            wait_seconds = (next_run - datetime.now()).total_seconds()
+        # Run immediately on startup if cron is enabled
+        if self.enable_cron_scheduler:
+            logger.info(f"Cron Schedule: {self.cron_expression}")
+            try:
+                self.run_check()
+            except Exception as e:
+                logger.error(f"Unexpected error in initial check: {str(e)}")
             
-            if wait_seconds > 0:
-                logger.info(f"Next check scheduled at: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_seconds:.0f}s)")
+            # Then wait for cron schedule
+            cron = croniter(self.cron_expression, datetime.now())
+            
+            while self.running:
+                next_run = cron.get_next(datetime)
+                wait_seconds = (next_run - datetime.now()).total_seconds()
                 
-                # Sleep in small intervals to allow for graceful shutdown
-                while wait_seconds > 0 and self.running:
-                    sleep_time = min(wait_seconds, 60)  # Check every minute
-                    time.sleep(sleep_time)
-                    wait_seconds -= sleep_time
-            
-            if self.running:
+                if wait_seconds > 0:
+                    logger.info(f"Next check scheduled at: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_seconds:.0f}s)")
+                    
+                    # Sleep in small intervals to allow for graceful shutdown
+                    while wait_seconds > 0 and self.running:
+                        sleep_time = min(wait_seconds, 60)  # Check every minute
+                        time.sleep(sleep_time)
+                        wait_seconds -= sleep_time
+                
+                if self.running:
+                    try:
+                        self.run_check()
+                    except Exception as e:
+                        logger.error(f"Unexpected error in main loop: {str(e)}")
+        else:
+            # If cron scheduler is disabled, just keep the main thread alive for API server
+            if self.enable_api_trigger:
+                logger.info("Cron scheduler disabled, waiting for API trigger...")
+                while self.running:
+                    time.sleep(60)
+            else:
+                logger.warning("Both cron scheduler and API trigger are disabled. Running single check and exiting.")
                 try:
                     self.run_check()
                 except Exception as e:
-                    logger.error(f"Unexpected error in main loop: {str(e)}")
+                    logger.error(f"Unexpected error in single check: {str(e)}")
+
+    def _run_api_server(self):
+        """Run HTTP server for API trigger"""
+        service = self
+        
+        class TriggerHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                logger.debug(f"API: {args[0]}")
+            
+            def do_GET(self):
+                parsed = urlparse(self.path)
+                query = parse_qs(parsed.query)
+                
+                # Check API key
+                provided_key = query.get('key', [''])[0]
+                if service.api_trigger_key and provided_key != service.api_trigger_key:
+                    self.send_response(401)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': 'Invalid API key'}).encode())
+                    return
+                
+                if parsed.path == '/trigger':
+                    if service.check_running:
+                        self.send_response(409)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({'error': 'Check already in progress'}).encode())
+                        return
+                    
+                    # Trigger check in background thread
+                    def run_async_check():
+                        try:
+                            service.run_check()
+                        except Exception as e:
+                            logger.error(f"Error in triggered check: {str(e)}")
+                    
+                    thread = threading.Thread(target=run_async_check, daemon=True)
+                    thread.start()
+                    
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'message': 'Check triggered successfully'}).encode())
+                
+                elif parsed.path == '/status':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    status = {
+                        'running': service.running,
+                        'check_in_progress': service.check_running,
+                        'cron_enabled': service.enable_cron_scheduler,
+                        'cron_expression': service.cron_expression if service.enable_cron_scheduler else None
+                    }
+                    self.wfile.write(json.dumps(status).encode())
+                
+                elif parsed.path == '/health':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok'}).encode())
+                
+                else:
+                    self.send_response(404)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': 'Not found'}).encode())
+        
+        try:
+            server = HTTPServer(('0.0.0.0', service.api_trigger_port), TriggerHandler)
+            logger.info(f"API server started on port {service.api_trigger_port}")
+            server.serve_forever()
+        except Exception as e:
+            logger.error(f"Failed to start API server: {str(e)}")
 
     def run_check(self):
-        logger.info("Starting check cycle...")
+        if self.check_running:
+            logger.warning("Check already in progress, skipping...")
+            return
         
-        if self.test_mode in ['all', 'cfip']:
-            self.check_cf_ips()
+        self.check_running = True
+        try:
+            logger.info("Starting check cycle...")
             
-        if self.test_mode in ['all', 'proxyip']:
-            self.check_proxy_ips()
-            
-        if self.test_mode in ['all', 'outbound']:
-            self.check_outbounds()
-            
-        logger.info("Check cycle completed")
+            if self.test_mode in ['all', 'cfip']:
+                self.check_cf_ips()
+                
+            if self.test_mode in ['all', 'proxyip']:
+                self.check_proxy_ips()
+                
+            if self.test_mode in ['all', 'outbound']:
+                self.check_outbounds()
+                
+            logger.info("Check cycle completed")
+        finally:
+            self.check_running = False
 
     def check_cfst_binary(self):
         """Check and download CFST binary if not present"""
