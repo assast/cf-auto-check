@@ -635,13 +635,13 @@ class CFAutoCheck:
                             latency_val = result['latency']  # ms
                             speed_val = result['speed'] * 1024  # Convert MB/s to KB/s for API
 
-                            # Build remark: 速度|延迟|地区 原始地址[DUP:x]
+                            # Build name: 速度|延迟|地区 原始地址[DUP:x]
                             speed_str = f"{result['speed']:.2f}MB/s"
                             latency_str = f"{latency_val:.2f}ms"
-                            remark = f"{speed_str}|{latency_str}|{country} {original_addr}{dup_mark}"
+                            name = f"{speed_str}|{latency_str}|{country} {original_addr}{dup_mark}"
 
                             update_data = {
-                                'remark': remark,
+                                'name': name,
                                 'enabled': should_enable,
                                 'status': new_status,
                                 'fail_count': new_fail_count,
@@ -668,9 +668,9 @@ class CFAutoCheck:
                                     new_status = 'invalid'
 
                             # IP not in CFST results (failed test), disable it and update with N/A
-                            remark = f"N/A|N/A|N/A {original_addr}{dup_mark}"
+                            name = f"N/A|N/A|N/A {original_addr}{dup_mark}"
                             update_data = {
-                                'remark': remark,
+                                'name': name,
                                 'enabled': False,
                                 'status': new_status,
                                 'fail_count': new_fail_count,
@@ -700,9 +700,9 @@ class CFAutoCheck:
                         if current_status == 'invalid':
                             new_status = 'invalid'
                             
-                    remark = f"N/A|N/A|N/A {original_addr}"
+                    name = f"N/A|N/A|N/A {original_addr}"
                     update_data = {
-                        'remark': remark,
+                        'name': name,
                         'enabled': should_enable,
                         'status': new_status,
                         'fail_count': new_fail_count,
