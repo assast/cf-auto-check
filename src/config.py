@@ -32,6 +32,9 @@ class Config:
     # Download speed test count (CFST -dn parameter)
     SPEED_TEST_COUNT = int(os.getenv('SPEED_TEST_COUNT', 20))  # Number of IPs to test download speed (after latency sort)
     SPEED_ENABLE_COUNT = int(os.getenv('SPEED_ENABLE_COUNT', 50))   # Enable top N IPs by speed
+    
+    # Result cache TTL in hours (skip testing if result file exists within this period)
+    RESULT_CACHE_HOURS = float(os.getenv('RESULT_CACHE_HOURS', 8))
 
     # Test Mode: cfip, proxyip, outbound, all
     TEST_MODE = os.getenv('TEST_MODE', 'cfip')

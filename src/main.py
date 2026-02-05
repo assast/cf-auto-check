@@ -411,6 +411,18 @@ class CFAutoCheck:
 
         port_result_file = os.path.join(self.cfst_dir, f'result_{port}.csv')
 
+        # Check if cached result exists and is still valid
+        cache_hours = Config.RESULT_CACHE_HOURS
+        if os.path.exists(port_result_file) and cache_hours > 0:
+            file_mtime = os.path.getmtime(port_result_file)
+            file_age_hours = (time.time() - file_mtime) / 3600
+            if file_age_hours < cache_hours:
+                logger.info(f"Using cached result for port {port} (age: {file_age_hours:.1f}h, TTL: {cache_hours}h)")
+                cached_results = self.parse_cfst_results(port_result_file)
+                if cached_results:
+                    return cached_results
+                logger.warning(f"Failed to parse cached result for port {port}, re-testing...")
+
         # Build CFST command
         cmd = [
             self.cfst_path,
