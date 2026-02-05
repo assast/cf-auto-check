@@ -291,9 +291,10 @@ class CFAutoCheck:
 
     def export_ips_by_port(self, cfips):
         """Group CF IPs by port and export to separate files for CFST."""
-        # Store mapping from IP to list of original cfips for later lookup
-        # Use list to handle multiple domains resolving to same IP
-        self.ip_to_cfips = {}  # IP -> list of cfips
+        # Store mapping from (IP, port) to list of original cfips for port-specific lookup
+        self.ip_port_to_cfips = {}  # (IP, port) -> list of cfips
+        # Track IP occurrence count for duplicate marking
+        self.ip_occurrence_count = {}  # IP -> count (across all ports)
         # Track unresolved cfips for later
         self.unresolved_cfips = []
         # Group IPs by port
@@ -324,13 +325,19 @@ class CFAutoCheck:
             if ip_addr not in self.port_groups[port]:
                 self.port_groups[port].append(ip_addr)
             
-            # Store mapping (IP -> list of cfips), append to list
-            if ip_addr not in self.ip_to_cfips:
-                self.ip_to_cfips[ip_addr] = []
-            self.ip_to_cfips[ip_addr].append(cfip)
+            # Store mapping ((IP, port) -> list of cfips), append to list
+            key = (ip_addr, port)
+            if key not in self.ip_port_to_cfips:
+                self.ip_port_to_cfips[key] = []
+            self.ip_port_to_cfips[key].append(cfip)
+            
+            # Count IP occurrences across all ports
+            self.ip_occurrence_count[ip_addr] = self.ip_occurrence_count.get(ip_addr, 0) + 1
         
-        total_cfips = sum(len(cfips) for cfips in self.ip_to_cfips.values())
-        logger.info(f"Grouped {total_cfips} CFIPs into {len(self.ip_to_cfips)} unique IPs, {len(self.port_groups)} port groups, {len(self.unresolved_cfips)} unresolved")
+        total_cfips = sum(len(cfips) for cfips in self.ip_port_to_cfips.values())
+        unique_ips = len(set(ip for ip, _ in self.ip_port_to_cfips.keys()))
+        dup_ips = sum(1 for count in self.ip_occurrence_count.values() if count > 1)
+        logger.info(f"Grouped {total_cfips} CFIPs into {unique_ips} unique IPs, {len(self.port_groups)} port groups, {len(self.unresolved_cfips)} unresolved, {dup_ips} duplicate IPs")
 
     def _resolve_domain(self, domain):
         """Resolve domain using multiple methods"""
@@ -541,21 +548,26 @@ class CFAutoCheck:
                 logger.error("CFST failed, no results to update")
                 return
 
-            # Get top N IPs by speed to enable
-            top_ips = set(r['address'] for r in cfst_results[:self.speed_enable_count])
+            # Get top N IPs by speed to enable (using (IP, port) combination)
+            top_ip_ports = set((r['address'], r['port']) for r in cfst_results[:self.speed_enable_count])
 
-            logger.info(f"Enabling top {len(top_ips)} IPs by download speed")
+            logger.info(f"Enabling top {len(top_ip_ports)} IP:port combinations by download speed")
 
-            # Create mapping from resolved IP to CFST result
-            ip_to_result = {r['address']: r for r in cfst_results}
+            # Create mapping from (IP, port) to CFST result for port-specific matching
+            ip_port_to_result = {(r['address'], r['port']): r for r in cfst_results}
 
-            # Update API using ip_to_cfips mapping (now handles multiple cfips per IP)
+            # Update API using ip_port_to_cfips mapping (handles port-specific results)
             if self.enable_auto_update:
                 enabled_count = 0
-                for ip_addr, cfip_list in self.ip_to_cfips.items():
-                    result = ip_to_result.get(ip_addr)
+                for (ip_addr, port), cfip_list in self.ip_port_to_cfips.items():
+                    result = ip_port_to_result.get((ip_addr, port))
                     
-                    # Get IP info once for all cfips mapping to this IP
+                    # Check if this IP appears multiple times (duplicate)
+                    is_duplicate = self.ip_occurrence_count.get(ip_addr, 0) > 1
+                    dup_count = self.ip_occurrence_count.get(ip_addr, 0)
+                    dup_mark = f"[DUP:{dup_count}] " if is_duplicate else ""
+                    
+                    # Get IP info once for all cfips mapping to this (IP, port)
                     if result:
                         ip_info = self._get_ip_info(ip_addr)
                         if ip_info:
@@ -565,20 +577,20 @@ class CFAutoCheck:
                             country = result['region'] or 'N/A'
                             isp = 'N/A'
                     
-                    # Update all cfips that resolved to this IP
+                    # Update all cfips that resolved to this (IP, port)
                     for cfip in cfip_list:
                         ip_id = cfip.get('id')
                         original_addr = cfip.get('address')
 
                         if result:
-                            should_enable = ip_addr in top_ips
+                            should_enable = (ip_addr, port) in top_ip_ports
                             latency_val = result['latency']  # ms
                             speed_val = result['speed'] * 1024  # Convert MB/s to KB/s for API
 
-                            # Build remark: 速度|延迟|地区 原始地址
+                            # Build remark: [DUP] 速度|延迟|地区 原始地址
                             speed_str = f"{result['speed']:.2f}MB/s"
                             latency_str = f"{latency_val:.2f}ms"
-                            remark = f"{speed_str}|{latency_str}|{country} {original_addr}"
+                            remark = f"{dup_mark}{speed_str}|{latency_str}|{country} {original_addr}"
 
                             update_data = {
                                 'remark': remark,
@@ -592,10 +604,10 @@ class CFAutoCheck:
                             if should_enable:
                                 enabled_count += 1
                             status_str = "enabled" if should_enable else "disabled"
-                            logger.info(f"Updating {original_addr}: {latency_str}, {speed_str}, {country} ({status_str})")
+                            logger.info(f"Updating {original_addr}:{port}: {latency_str}, {speed_str}, {country} ({status_str}){' [DUP]' if is_duplicate else ''}")
                         else:
                             # IP not in CFST results (failed test), disable it and update with N/A
-                            remark = f"N/A|N/A|N/A {original_addr}"
+                            remark = f"{dup_mark}N/A|N/A|N/A {original_addr}"
                             update_data = {
                                 'remark': remark,
                                 'enabled': False,
@@ -604,7 +616,7 @@ class CFAutoCheck:
                                 'country': 'N/A',
                                 'isp': 'N/A'
                             }
-                            logger.info(f"Disabling {original_addr} (not in CFST results)")
+                            logger.info(f"Disabling {original_addr}:{port} (not in CFST results){' [DUP]' if is_duplicate else ''}")
 
                         self.api_client.update_cf_ip(ip_id, update_data)
 
@@ -623,7 +635,7 @@ class CFAutoCheck:
                     self.api_client.update_cf_ip(cfip.get('id'), update_data)
                     logger.info(f"Updated remark for {original_addr} (could not resolve, keeping enabled status)")
 
-            logger.info(f"CF IP checks completed. {enabled_count} CFIPs enabled (top {len(top_ips)} unique IPs).")
+            logger.info(f"CF IP checks completed. {enabled_count} CFIPs enabled (top {len(top_ip_ports)} IP:port combinations).")
 
             # Send Telegram notification
             self.telegram.send_cfip_results(cfst_results, top_count=self.speed_enable_count)
