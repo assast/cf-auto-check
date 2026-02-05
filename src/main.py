@@ -629,10 +629,10 @@ class CFAutoCheck:
                             latency_val = result['latency']  # ms
                             speed_val = result['speed'] * 1024  # Convert MB/s to KB/s for API
 
-                            # Build remark: [DUP] 速度|延迟|地区 原始地址
+                            # Build remark: 速度|延迟|地区 原始地址[DUP:x]
                             speed_str = f"{result['speed']:.2f}MB/s"
                             latency_str = f"{latency_val:.2f}ms"
-                            remark = f"{dup_mark}{speed_str}|{latency_str}|{country} {original_addr}"
+                            remark = f"{speed_str}|{latency_str}|{country} {original_addr}{dup_mark}"
 
                             update_data = {
                                 'remark': remark,
@@ -649,7 +649,7 @@ class CFAutoCheck:
                             logger.info(f"Updating {original_addr}:{port}: {latency_str}, {speed_str}, {country} ({status_str}){' [DUP]' if is_duplicate else ''}")
                         else:
                             # IP not in CFST results (failed test), disable it and update with N/A
-                            remark = f"{dup_mark}N/A|N/A|N/A {original_addr}"
+                            remark = f"N/A|N/A|N/A {original_addr}{dup_mark}"
                             update_data = {
                                 'remark': remark,
                                 'enabled': False,
