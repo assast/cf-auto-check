@@ -136,10 +136,13 @@ class CFAutoCheck:
                         self.wfile.write(json.dumps({'error': 'Check already in progress'}).encode())
                         return
                     
+                    # Check for force parameter
+                    force_refresh = query.get('force', [''])[0].lower() in ['true', '1', 'yes']
+                    
                     # Trigger check in background thread
                     def run_async_check():
                         try:
-                            service.run_check()
+                            service.run_check(force_refresh=force_refresh)
                         except Exception as e:
                             logger.error(f"Error in triggered check: {str(e)}")
                     
@@ -149,7 +152,8 @@ class CFAutoCheck:
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps({'message': 'Check triggered successfully'}).encode())
+                    msg = 'Check triggered successfully' + (' (force refresh)' if force_refresh else '')
+                    self.wfile.write(json.dumps({'message': msg, 'force': force_refresh}).encode())
                 
                 elif parsed.path == '/status':
                     self.send_response(200)
@@ -182,13 +186,36 @@ class CFAutoCheck:
         except Exception as e:
             logger.error(f"Failed to start API server: {str(e)}")
 
-    def run_check(self):
+    def clear_result_cache(self):
+        """Clear all cached result files"""
+        if not os.path.exists(self.cfst_dir):
+            return
+        
+        count = 0
+        for filename in os.listdir(self.cfst_dir):
+            if filename.startswith('result_') and filename.endswith('.csv'):
+                filepath = os.path.join(self.cfst_dir, filename)
+                try:
+                    os.remove(filepath)
+                    count += 1
+                    logger.info(f"Deleted cached result: {filename}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete {filename}: {str(e)}")
+        
+        if count > 0:
+            logger.info(f"Cleared {count} cached result file(s)")
+
+    def run_check(self, force_refresh=False):
         if self.check_running:
             logger.warning("Check already in progress, skipping...")
             return
         
         self.check_running = True
         try:
+            if force_refresh:
+                logger.info("Force refresh requested, clearing result cache...")
+                self.clear_result_cache()
+            
             logger.info("Starting check cycle...")
             
             if self.test_mode in ['all', 'cfip']:
