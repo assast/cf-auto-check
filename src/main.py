@@ -413,7 +413,7 @@ class CFAutoCheck:
             '-n', str(self.concurrent_tests),
             '-url', 'https://download.parallels.com/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg',
             '-dn', str(download_count),
-            '-p', str(download_count),
+            '-p', str(download_count*5),
             '-debug'
         ]
 

@@ -132,3 +132,6 @@ cf-auto-check/
 ├── Dockerfile               # Docker build configuration
 └── requirements.txt         # Python dependencies
 ```
+
+
+https://github.com/XIU2/CloudflareSpeedTest
