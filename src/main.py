@@ -473,8 +473,8 @@ class CFAutoCheck:
             logger.error("CFST failed: No results")
             return None
 
-        # Sort by download speed (descending, higher is better)
-        all_results.sort(key=lambda x: x['speed'], reverse=True)
+        # Sort by download speed (descending), then by latency (ascending) if speed is equal
+        all_results.sort(key=lambda x: (-x['speed'], x['latency']))
 
         logger.info(f"CFST completed: {len(all_results)} IPs tested")
         logger.info(f"Top 10 by speed:")
