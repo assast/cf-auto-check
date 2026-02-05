@@ -623,9 +623,15 @@ class CFAutoCheck:
                     for cfip in cfip_list:
                         ip_id = cfip.get('id')
                         original_addr = cfip.get('address')
+                        current_fail_count = int(cfip.get('fail_count') or 0)
+                        current_status = cfip.get('status')
 
                         if result:
+                            # Success: Reset fail_count
+                            new_fail_count = 0
                             should_enable = (ip_addr, port) in top_ip_ports
+                            new_status = 'enabled' if should_enable else 'disabled'
+                            
                             latency_val = result['latency']  # ms
                             speed_val = result['speed'] * 1024  # Convert MB/s to KB/s for API
 
@@ -637,6 +643,8 @@ class CFAutoCheck:
                             update_data = {
                                 'remark': remark,
                                 'enabled': should_enable,
+                                'status': new_status,
+                                'fail_count': new_fail_count,
                                 'latency': round(latency_val, 2),
                                 'speed': round(speed_val, 2),
                                 'country': country,
@@ -645,37 +653,66 @@ class CFAutoCheck:
 
                             if should_enable:
                                 enabled_count += 1
-                            status_str = "enabled" if should_enable else "disabled"
-                            logger.info(f"Updating {original_addr}:{port}: {latency_str}, {speed_str}, {country} ({status_str}){' [DUP]' if is_duplicate else ''}")
+                            logger.info(f"Updating {original_addr}:{port}: {latency_str}, {speed_str}, {country} ({new_status}){' [DUP]' if is_duplicate else ''}")
                         else:
+                            # Failure: Increment fail_count
+                            new_fail_count = current_fail_count + 1
+                            should_enable = False
+                            
+                            if new_fail_count >= 10:
+                                new_status = 'invalid'
+                            else:
+                                new_status = 'disabled'
+                                # If it was already invalid, keep it invalid
+                                if current_status == 'invalid':
+                                    new_status = 'invalid'
+
                             # IP not in CFST results (failed test), disable it and update with N/A
                             remark = f"N/A|N/A|N/A {original_addr}{dup_mark}"
                             update_data = {
                                 'remark': remark,
                                 'enabled': False,
+                                'status': new_status,
+                                'fail_count': new_fail_count,
                                 'latency': 0,
                                 'speed': 0,
                                 'country': 'N/A',
                                 'isp': 'N/A'
                             }
-                            logger.info(f"Disabling {original_addr}:{port} (not in CFST results){' [DUP]' if is_duplicate else ''}")
+                            logger.info(f"Disabling {original_addr}:{port} (failed test, fail_count={new_fail_count}, status={new_status}){' [DUP]' if is_duplicate else ''}")
 
                         self.api_client.update_cf_ip(ip_id, update_data)
 
-                # Update unresolved cfips: only update remark, keep current enabled status
+                # Update unresolved cfips
                 for cfip in self.unresolved_cfips:
                     original_addr = cfip.get('address')
+                    current_fail_count = int(cfip.get('fail_count') or 0)
+                    current_status = cfip.get('status')
+                    
+                    new_fail_count = current_fail_count + 1
+                    
+                    if new_fail_count >= 10:
+                        new_status = 'invalid'
+                        should_enable = False
+                    else:
+                        new_status = 'disabled'
+                        should_enable = False
+                        if current_status == 'invalid':
+                            new_status = 'invalid'
+                            
                     remark = f"N/A|N/A|N/A {original_addr}"
                     update_data = {
                         'remark': remark,
-                        # Don't change 'enabled' - keep current status
+                        'enabled': should_enable,
+                        'status': new_status,
+                        'fail_count': new_fail_count,
                         'latency': 0,
                         'speed': 0,
                         'country': 'N/A',
                         'isp': 'N/A'
                     }
                     self.api_client.update_cf_ip(cfip.get('id'), update_data)
-                    logger.info(f"Updated remark for {original_addr} (could not resolve, keeping enabled status)")
+                    logger.info(f"Updated {original_addr} (unresolved, fail_count={new_fail_count}, status={new_status})")
 
             logger.info(f"CF IP checks completed. {enabled_count} CFIPs enabled (top {len(top_ip_ports)} IP:port combinations).")
 
