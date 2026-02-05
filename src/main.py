@@ -34,6 +34,7 @@ class CFAutoCheck:
         self.api_trigger_key = Config.API_TRIGGER_KEY
         self.api_trigger_port = Config.API_TRIGGER_PORT
         self.speed_test_count = Config.SPEED_TEST_COUNT
+        self.speed_test_count_443 = Config.SPEED_TEST_COUNT_443
         self.speed_enable_count = Config.SPEED_ENABLE_COUNT
         
         self.running = True
@@ -501,14 +502,16 @@ class CFAutoCheck:
     def run_cfst(self):
         """Run CFST: test latency for all IPs, then test speed for top N by latency"""
         logger.info("=" * 60)
-        logger.info(f"Running CFST (download test: top {self.speed_test_count} IPs by latency)")
+        logger.info(f"Running CFST (download test: {self.speed_test_count_443} IPs for port 443, {self.speed_test_count} IPs for others)")
         logger.info("=" * 60)
 
         all_results = []
 
         for port, ips in self.port_groups.items():
-            logger.info(f"Testing {len(ips)} IPs on port {port}")
-            results = self.run_cfst_for_port(port, ips, download_count=self.speed_test_count)
+            # Use different download count for port 443 vs others
+            download_count = self.speed_test_count_443 if port == 443 else self.speed_test_count
+            logger.info(f"Testing {len(ips)} IPs on port {port} (download test: {download_count} IPs)")
+            results = self.run_cfst_for_port(port, ips, download_count=download_count)
             if results:
                 # Add port info to each result
                 for r in results:

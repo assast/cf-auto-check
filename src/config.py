@@ -30,7 +30,8 @@ class Config:
     CONCURRENT_TESTS = int(os.getenv('CONCURRENT_TESTS', 5))
 
     # Download speed test count (CFST -dn parameter)
-    SPEED_TEST_COUNT = int(os.getenv('SPEED_TEST_COUNT', 20))  # Number of IPs to test download speed (after latency sort)
+    SPEED_TEST_COUNT_443 = int(os.getenv('SPEED_TEST_COUNT_443', 30))  # For port 443 (usually has most IPs)
+    SPEED_TEST_COUNT = int(os.getenv('SPEED_TEST_COUNT', 20))  # For non-443 ports
     SPEED_ENABLE_COUNT = int(os.getenv('SPEED_ENABLE_COUNT', 50))   # Enable top N IPs by speed
     
     # Result cache TTL in hours (skip testing if result file exists within this period)
