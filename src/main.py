@@ -327,20 +327,25 @@ class CFAutoCheck:
         self.unresolved_cfips = []
         # Group IPs by port
         self.port_groups = {}
+        # Track which cfip IDs have domain addresses (not raw IPs)
+        self.cfip_is_domain = {}  # cfip_id -> True if address is domain
         
         for cfip in cfips:
             address = cfip.get('address')
             port = cfip.get('port', 443)
+            cfip_id = cfip.get('id')
             
             # Check if address is a domain name
             try:
                 socket.inet_aton(address)  # This is already an IP
                 ip_addr = address
+                self.cfip_is_domain[cfip_id] = False
             except socket.error:
                 # It's a domain, resolve it with multiple methods
+                self.cfip_is_domain[cfip_id] = True
                 ip_addr = self._resolve_domain(address)
                 if ip_addr is None:
-                    logger.warning(f"Could not resolve {address}, keeping current enabled status")
+                    logger.warning(f"Could not resolve {address}, keeping current status")
                     self.unresolved_cfips.append(cfip)
                     continue
                 logger.info(f"Resolved {address} -> {ip_addr}")
@@ -624,13 +629,14 @@ class CFAutoCheck:
                         ip_id = cfip.get('id')
                         original_addr = cfip.get('address')
                         current_fail_count = int(cfip.get('fail_count') or 0)
-                        current_status = cfip.get('status')
+                        current_status = cfip.get('status') or 'enabled'
+                        
+                        # Check if this cfip address is a domain (优选域名)
+                        is_domain = self.cfip_is_domain.get(ip_id, False)
 
                         if result:
                             # Success: Reset fail_count
                             new_fail_count = 0
-                            should_enable = (ip_addr, port) in top_ip_ports
-                            new_status = 'enabled' if should_enable else 'disabled'
                             
                             latency_val = result['latency']  # ms
                             speed_val = result['speed'] * 1024  # Convert MB/s to KB/s for API
@@ -642,8 +648,6 @@ class CFAutoCheck:
 
                             update_data = {
                                 'name': name,
-                                'enabled': should_enable,
-                                'status': new_status,
                                 'fail_count': new_fail_count,
                                 'latency': round(latency_val, 2),
                                 'speed': round(speed_val, 2),
@@ -651,70 +655,74 @@ class CFAutoCheck:
                                 'isp': isp
                             }
 
-                            if should_enable:
-                                enabled_count += 1
-                            logger.info(f"Updating {original_addr}:{port}: {latency_str}, {speed_str}, {country} ({new_status}){' [DUP]' if is_duplicate else ''}")
+                            # For domain addresses (优选域名), do NOT change status
+                            # For IP addresses (优选IP), update status based on speed ranking
+                            if is_domain:
+                                domain_mark = " [DOMAIN-KEEP]"
+                                logger.info(f"Updating {original_addr}:{port}: {latency_str}, {speed_str}, {country} (keeping status={current_status}){' [DUP]' if is_duplicate else ''}{domain_mark}")
+                            else:
+                                is_top = (ip_addr, port) in top_ip_ports
+                                new_status = 'enabled' if is_top else 'disabled'
+                                update_data['status'] = new_status
+                                if new_status == 'enabled':
+                                    enabled_count += 1
+                                logger.info(f"Updating {original_addr}:{port}: {latency_str}, {speed_str}, {country} ({new_status}){' [DUP]' if is_duplicate else ''}")
                         else:
                             # Failure: Increment fail_count
                             new_fail_count = current_fail_count + 1
-                            should_enable = False
-                            
-                            if new_fail_count >= 10:
-                                new_status = 'invalid'
-                            else:
-                                new_status = 'disabled'
-                                # If it was already invalid, keep it invalid
-                                if current_status == 'invalid':
-                                    new_status = 'invalid'
 
-                            # IP not in CFST results (failed test), disable it and update with N/A
+                            # IP not in CFST results (failed test), update with N/A
                             name = f"N/A|N/A|N/A {original_addr}{dup_mark}"
                             update_data = {
                                 'name': name,
-                                'enabled': False,
-                                'status': new_status,
                                 'fail_count': new_fail_count,
                                 'latency': 0,
                                 'speed': 0,
                                 'country': 'N/A',
                                 'isp': 'N/A'
                             }
-                            logger.info(f"Disabling {original_addr}:{port} (failed test, fail_count={new_fail_count}, status={new_status}){' [DUP]' if is_duplicate else ''}")
+                            
+                            # For domain addresses (优选域名), do NOT change status
+                            # For IP addresses (优选IP), update status based on fail_count
+                            if is_domain:
+                                domain_mark = " [DOMAIN-KEEP]"
+                                logger.info(f"Updating {original_addr}:{port} (failed test, fail_count={new_fail_count}, keeping status={current_status}){' [DUP]' if is_duplicate else ''}{domain_mark}")
+                            else:
+                                if new_fail_count >= 10:
+                                    new_status = 'invalid'
+                                elif current_status == 'invalid':
+                                    new_status = 'invalid'  # Keep invalid
+                                else:
+                                    new_status = 'disabled'
+                                update_data['status'] = new_status
+                                logger.info(f"Disabling {original_addr}:{port} (failed test, fail_count={new_fail_count}, status={new_status}){' [DUP]' if is_duplicate else ''}")
 
                         self.api_client.update_cf_ip(ip_id, update_data)
 
-                # Update unresolved cfips
+                # Update unresolved cfips (these are all domain addresses that couldn't be resolved)
+                # 优选域名无法解析时，不更新状态
                 for cfip in self.unresolved_cfips:
+                    cfip_id = cfip.get('id')
                     original_addr = cfip.get('address')
                     current_fail_count = int(cfip.get('fail_count') or 0)
-                    current_status = cfip.get('status')
+                    current_status = cfip.get('status') or 'enabled'
                     
                     new_fail_count = current_fail_count + 1
-                    
-                    if new_fail_count >= 10:
-                        new_status = 'invalid'
-                        should_enable = False
-                    else:
-                        new_status = 'disabled'
-                        should_enable = False
-                        if current_status == 'invalid':
-                            new_status = 'invalid'
                             
                     name = f"N/A|N/A|N/A {original_addr}"
+                    # Only update test results, do NOT change status for domains
                     update_data = {
                         'name': name,
-                        'enabled': should_enable,
-                        'status': new_status,
                         'fail_count': new_fail_count,
                         'latency': 0,
                         'speed': 0,
                         'country': 'N/A',
                         'isp': 'N/A'
                     }
-                    self.api_client.update_cf_ip(cfip.get('id'), update_data)
-                    logger.info(f"Updated {original_addr} (unresolved, fail_count={new_fail_count}, status={new_status})")
+                    self.api_client.update_cf_ip(cfip_id, update_data)
+                    logger.info(f"Updated {original_addr} (unresolved, fail_count={new_fail_count}, keeping status={current_status}) [DOMAIN-KEEP]")
 
-            logger.info(f"CF IP checks completed. {enabled_count} CFIPs enabled (top {len(top_ip_ports)} IP:port combinations).")
+            logger.info(f"CF IP checks completed. {enabled_count} IP-based CFIPs enabled (top {len(top_ip_ports)} IP:port combinations).")
 
             # Send Telegram notification
             self.telegram.send_cfip_results(cfst_results, top_count=self.speed_enable_count)
