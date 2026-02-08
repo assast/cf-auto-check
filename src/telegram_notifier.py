@@ -1,4 +1,5 @@
 import requests
+import time
 from .config import Config
 from .logger import logger
 
@@ -25,8 +26,8 @@ class TelegramNotifier:
             }
         return None
     
-    def send_message(self, message: str, parse_mode: str = 'HTML') -> bool:
-        """Send a message to Telegram"""
+    def send_message(self, message: str, parse_mode: str = 'HTML', max_retries: int = 3) -> bool:
+        """Send a message to Telegram with retry logic"""
         if not self.enabled:
             return False
         
@@ -38,24 +39,32 @@ class TelegramNotifier:
             'parse_mode': parse_mode
         }
         
-        try:
-            response = requests.post(
-                url,
-                json=payload,
-                proxies=self._get_proxies(),
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                logger.info("Telegram notification sent successfully")
-                return True
-            else:
-                logger.error(f"Telegram API error: {response.status_code} - {response.text}")
-                return False
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    proxies=self._get_proxies(),
+                    timeout=30
+                )
                 
-        except Exception as e:
-            logger.error(f"Failed to send Telegram notification: {str(e)}")
-            return False
+                if response.status_code == 200:
+                    logger.info("Telegram notification sent successfully")
+                    return True
+                else:
+                    logger.error(f"Telegram API error: {response.status_code} - {response.text}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"Retrying... (attempt {attempt + 2}/{max_retries})")
+                        time.sleep(2 * (attempt + 1))  # Exponential backoff
+                    
+            except Exception as e:
+                logger.error(f"Failed to send Telegram notification: {str(e)}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying... (attempt {attempt + 2}/{max_retries})")
+                    time.sleep(2 * (attempt + 1))
+        
+        logger.error(f"Failed to send Telegram notification after {max_retries} attempts")
+        return False
     
     def send_cfip_results(self, results: list, top_count: int = 30):
         """Send CF IP test results to Telegram"""
@@ -86,4 +95,25 @@ class TelegramNotifier:
         lines.append(f"✅ Total tested: {len(results)} IPs")
         
         message = "\n".join(lines)
+        return self.send_message(message)
+
+    def send_dns_update(self, record_name: str, old_ip: str, new_ip: str):
+        """Send DNS update notification to Telegram"""
+        if not self.enabled:
+            return False
+        
+        if old_ip and old_ip != new_ip:
+            message = (
+                f"🔄 <b>CF DNS Updated</b>\n\n"
+                f"📍 Record: <code>{record_name}</code>\n"
+                f"🔴 Old IP: <code>{old_ip}</code>\n"
+                f"🟢 New IP: <code>{new_ip}</code>"
+            )
+        else:
+            message = (
+                f"✅ <b>CF DNS Created</b>\n\n"
+                f"📍 Record: <code>{record_name}</code>\n"
+                f"🟢 IP: <code>{new_ip}</code>"
+            )
+        
         return self.send_message(message)

@@ -36,6 +36,23 @@ class Config:
     
     # Result cache TTL in hours (skip testing if result file exists within this period)
     RESULT_CACHE_HOURS = float(os.getenv('RESULT_CACHE_HOURS', 8))
+    
+    # Sync to Cloudflare A record (requires CF API configuration)
+    SYNC_TO_CF = os.getenv('SYNC_TO_CF', 'false').lower() == 'true'
+    
+    # Selection mode for best IP:
+    #   lowest_latency     - Select by lowest latency
+    #   highest_speed      - Select by highest download speed (default)
+    #   lowest_latency_nonzero - Select by lowest latency among IPs with non-zero download speed
+    SELECT_MODE = os.getenv('SELECT_MODE', 'highest_speed')
+    
+    # Filter results by port (only use IPs from this port for selection), 0 means all ports
+    FILTER_PORT = int(os.getenv('FILTER_PORT', 443))
+    
+    # Cloudflare DNS API Configuration (for syncing best IP to A record)
+    CF_API_TOKEN = os.getenv('CF_API_TOKEN', '')  # Cloudflare API Token with DNS edit permission
+    CF_ZONE_ID = os.getenv('CF_ZONE_ID', '')      # Zone ID of the domain
+    CF_RECORD_NAME = os.getenv('CF_RECORD_NAME', '')  # DNS A record name to update (e.g., 'cf.example.com')
 
     # Test Mode: cfip, proxyip, outbound, all
     TEST_MODE = os.getenv('TEST_MODE', 'cfip')

@@ -36,6 +36,12 @@ class CFAutoCheck:
         self.speed_test_count = Config.SPEED_TEST_COUNT
         self.speed_test_count_443 = Config.SPEED_TEST_COUNT_443
         self.speed_enable_count = Config.SPEED_ENABLE_COUNT
+        self.sync_to_cf = Config.SYNC_TO_CF
+        self.select_mode = Config.SELECT_MODE
+        self.filter_port = Config.FILTER_PORT
+        self.cf_api_token = Config.CF_API_TOKEN
+        self.cf_zone_id = Config.CF_ZONE_ID
+        self.cf_record_name = Config.CF_RECORD_NAME
         
         self.running = True
         self.check_running = False  # Flag to prevent concurrent checks
@@ -60,6 +66,9 @@ class CFAutoCheck:
         logger.info(f"Cron Scheduler: {'Enabled' if self.enable_cron_scheduler else 'Disabled'}")
         logger.info(f"API Trigger: {'Enabled on port ' + str(self.api_trigger_port) if self.enable_api_trigger else 'Disabled'}")
         logger.info(f"Test Mode: {self.test_mode}")
+        logger.info(f"Select Mode: {self.select_mode}")
+        logger.info(f"Filter Port: {self.filter_port if self.filter_port > 0 else 'All ports'}")
+        logger.info(f"Sync to CF: {'Enabled' if self.sync_to_cf else 'Disabled'}")
         
         # Start API server if enabled
         if self.enable_api_trigger:
@@ -527,11 +536,27 @@ class CFAutoCheck:
             logger.error("CFST failed: No results")
             return None
 
-        # Sort by download speed (descending), then by latency (ascending) if speed is equal
-        all_results.sort(key=lambda x: (-x['speed'], x['latency']))
+        # Sort results based on select_mode
+        if self.select_mode == 'lowest_latency':
+            # Sort by latency (ascending)
+            all_results.sort(key=lambda x: (x['latency'], -x['speed']))
+            mode_desc = 'lowest latency'
+        elif self.select_mode == 'lowest_latency_nonzero':
+            # Filter to non-zero speed IPs, then sort by latency
+            nonzero_results = [r for r in all_results if r['speed'] > 0]
+            zero_results = [r for r in all_results if r['speed'] == 0]
+            nonzero_results.sort(key=lambda x: (x['latency'], -x['speed']))
+            zero_results.sort(key=lambda x: x['latency'])
+            # Non-zero speed IPs first, then zero speed IPs
+            all_results = nonzero_results + zero_results
+            mode_desc = 'lowest latency (non-zero speed first)'
+        else:  # highest_speed (default)
+            # Sort by download speed (descending), then by latency (ascending) if speed is equal
+            all_results.sort(key=lambda x: (-x['speed'], x['latency']))
+            mode_desc = 'highest speed'
 
-        logger.info(f"CFST completed: {len(all_results)} IPs tested")
-        logger.info(f"Top 10 by speed:")
+        logger.info(f"CFST completed: {len(all_results)} IPs tested, sorted by {mode_desc}")
+        logger.info(f"Top 10 results:")
         for i, r in enumerate(all_results[:10], 1):
             logger.info(f"  {i}. {r['address']} - {r['speed']:.2f}MB/s, {r['latency']:.2f}ms (port {r.get('port', 'N/A')})")
 
@@ -595,10 +620,17 @@ class CFAutoCheck:
                 logger.error("CFST failed, no results to update")
                 return
 
-            # Get top N IPs by speed to enable (using (IP, port) combination)
-            top_ip_ports = set((r['address'], r['port']) for r in cfst_results[:self.speed_enable_count])
+            # Filter results by port if specified
+            if self.filter_port > 0:
+                filtered_results = [r for r in cfst_results if r.get('port') == self.filter_port]
+                logger.info(f"Filtered to {len(filtered_results)} IPs on port {self.filter_port} (from {len(cfst_results)} total)")
+            else:
+                filtered_results = cfst_results
 
-            logger.info(f"Enabling top {len(top_ip_ports)} IP:port combinations by download speed")
+            # Get top N IPs to enable (using (IP, port) combination)
+            top_ip_ports = set((r['address'], r['port']) for r in filtered_results[:self.speed_enable_count])
+
+            logger.info(f"Enabling top {len(top_ip_ports)} IP:port combinations by {self.select_mode}")
 
             # Create mapping from (IP, port) to CFST result for port-specific matching
             ip_port_to_result = {(r['address'], r['port']): r for r in cfst_results}
@@ -724,11 +756,105 @@ class CFAutoCheck:
 
             logger.info(f"CF IP checks completed. {enabled_count} IP-based CFIPs enabled (top {len(top_ip_ports)} IP:port combinations).")
 
+            # Sync best IP to Cloudflare A record if enabled
+            if self.sync_to_cf and filtered_results:
+                best_ip = filtered_results[0]['address']
+                self.sync_cf_dns(best_ip)
+
             # Send Telegram notification
             self.telegram.send_cfip_results(cfst_results, top_count=self.speed_enable_count)
 
         except Exception as e:
             logger.error(f"Error checking CF IPs: {str(e)}")
+
+    def sync_cf_dns(self, ip_address):
+        """Sync best IP to Cloudflare DNS A record"""
+        if not self.cf_api_token or not self.cf_zone_id or not self.cf_record_name:
+            logger.warning("CF DNS sync enabled but missing configuration (CF_API_TOKEN, CF_ZONE_ID, or CF_RECORD_NAME)")
+            return False
+        
+        import requests
+        
+        headers = {
+            'Authorization': f'Bearer {self.cf_api_token}',
+            'Content-Type': 'application/json'
+        }
+        
+        try:
+            # First, get the record ID by listing DNS records
+            list_url = f"https://api.cloudflare.com/client/v4/zones/{self.cf_zone_id}/dns_records"
+            params = {'name': self.cf_record_name, 'type': 'A'}
+            
+            response = requests.get(list_url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data.get('success'):
+                logger.error(f"CF DNS API error: {data.get('errors', 'Unknown error')}")
+                return False
+            
+            records = data.get('result', [])
+            
+            if records:
+                # Update existing record
+                record_id = records[0]['id']
+                current_ip = records[0].get('content', '')
+                
+                if current_ip == ip_address:
+                    logger.info(f"CF DNS A record {self.cf_record_name} already points to {ip_address}, skipping update")
+                    return True
+                
+                update_url = f"https://api.cloudflare.com/client/v4/zones/{self.cf_zone_id}/dns_records/{record_id}"
+                update_data = {
+                    'type': 'A',
+                    'name': self.cf_record_name,
+                    'content': ip_address,
+                    'ttl': 60,  # 1 minute TTL for fast updates
+                    'proxied': False  # Don't proxy the A record
+                }
+                
+                response = requests.put(update_url, headers=headers, json=update_data, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                
+                if result.get('success'):
+                    logger.info(f"CF DNS A record {self.cf_record_name} updated: {current_ip} -> {ip_address}")
+                    # Send TG notification
+                    self.telegram.send_dns_update(self.cf_record_name, current_ip, ip_address)
+                    return True
+                else:
+                    logger.error(f"CF DNS update failed: {result.get('errors', 'Unknown error')}")
+                    return False
+            else:
+                # Create new record
+                create_url = f"https://api.cloudflare.com/client/v4/zones/{self.cf_zone_id}/dns_records"
+                create_data = {
+                    'type': 'A',
+                    'name': self.cf_record_name,
+                    'content': ip_address,
+                    'ttl': 60,
+                    'proxied': False
+                }
+                
+                response = requests.post(create_url, headers=headers, json=create_data, timeout=30)
+                response.raise_for_status()
+                result = response.json()
+                
+                if result.get('success'):
+                    logger.info(f"CF DNS A record {self.cf_record_name} created with IP {ip_address}")
+                    # Send TG notification
+                    self.telegram.send_dns_update(self.cf_record_name, '', ip_address)
+                    return True
+                else:
+                    logger.error(f"CF DNS create failed: {result.get('errors', 'Unknown error')}")
+                    return False
+                    
+        except requests.exceptions.RequestException as e:
+            logger.error(f"CF DNS sync failed: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"CF DNS sync error: {str(e)}")
+            return False
 
     def check_proxy_ips(self):
         pass
