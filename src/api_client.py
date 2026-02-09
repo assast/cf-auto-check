@@ -155,6 +155,10 @@ class ApiClient:
         
         success_count = 0
         fail_count = 0
+        total_count = len(updates)
+        completed_count = 0
+        
+        logger.info(f"Starting batch update for {total_count} items...")
         
         def update_single(id_data):
             id, data = id_data
@@ -169,10 +173,16 @@ class ApiClient:
             
             for future in as_completed(futures):
                 id, success, _ = future.result()
+                completed_count += 1
                 if success:
                     success_count += 1
                 else:
                     fail_count += 1
+                
+                # 每10个或者最后一个时显示进度
+                if completed_count % 10 == 0 or completed_count == total_count:
+                    progress_pct = (completed_count / total_count) * 100
+                    logger.info(f"Progress: {completed_count}/{total_count} ({progress_pct:.1f}%) - Success: {success_count}, Failed: {fail_count}")
         
         logger.info(f"Batch update completed: {success_count} success, {fail_count} failed")
         return (success_count, fail_count)

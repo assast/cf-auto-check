@@ -620,27 +620,27 @@ class CFAutoCheck:
                 logger.error("CFST failed, no results to update")
                 return
 
-            # Filter results by port if specified
-            if self.sync_to_cf_filter_port > 0:
-                filtered_results = [r for r in cfst_results if r.get('port') == self.sync_to_cf_filter_port]
-                logger.info(f"Filtered to {len(filtered_results)} IPs on port {self.sync_to_cf_filter_port} (from {len(cfst_results)} total)")
-            else:
-                filtered_results = cfst_results
-
             # Filter out IPs with zero download speed for enabling (only enable IPs with confirmed download speed)
-            nonzero_speed_results = [r for r in filtered_results if r.get('speed', 0) > 0]
-            zero_speed_results = [r for r in filtered_results if r.get('speed', 0) == 0]
-            logger.info(f"IPs with non-zero speed: {len(nonzero_speed_results)}, zero speed: {len(zero_speed_results)} (from {len(filtered_results)} filtered)")
+            # Use ALL cfst_results for IP selection (not filtered by port)
+            nonzero_speed_results = [r for r in cfst_results if r.get('speed', 0) > 0]
+            zero_speed_results = [r for r in cfst_results if r.get('speed', 0) == 0]
+            logger.info(f"IPs with non-zero speed: {len(nonzero_speed_results)}, zero speed: {len(zero_speed_results)} (from {len(cfst_results)} total)")
 
             # Priority: non-zero speed IPs first, then fill with zero-speed IPs if needed
             if len(nonzero_speed_results) >= self.speed_enable_count:
                 # Enough non-zero speed IPs, use only those
                 top_results = nonzero_speed_results[:self.speed_enable_count]
+                logger.info(f"Using top {len(top_results)} non-zero speed IPs (available: {len(nonzero_speed_results)})")
             else:
                 # Not enough non-zero speed IPs, fill remaining with zero-speed IPs
                 remaining_count = self.speed_enable_count - len(nonzero_speed_results)
                 top_results = nonzero_speed_results + zero_speed_results[:remaining_count]
                 logger.info(f"Not enough non-zero speed IPs ({len(nonzero_speed_results)}), adding {len(top_results) - len(nonzero_speed_results)} zero-speed IPs to reach {self.speed_enable_count}")
+            
+            # Log diagnostic info about top_results
+            zero_in_top = len([r for r in top_results if r.get('speed', 0) == 0])
+            if zero_in_top > 0:
+                logger.warning(f"Top results contain {zero_in_top} IPs with zero speed")
 
             # Get top N IPs to enable (using (IP, port) combination)
             top_ip_ports = set((r['address'], r['port']) for r in top_results)
@@ -732,19 +732,15 @@ class CFAutoCheck:
                             }
                             
                             # For domain addresses (优选域名), do NOT change status
-                            # For IP addresses (优选IP), update status based on fail_count
+                            # For IP addresses (优选IP), any single failure sets status to invalid
                             if is_domain:
                                 domain_mark = " [DOMAIN-KEEP]"
                                 logger.info(f"Updating {original_addr}:{port} (failed test, fail_count={new_fail_count}, keeping status={current_status}){' [DUP]' if is_duplicate else ''}{domain_mark}")
                             else:
-                                if new_fail_count >= 10:
-                                    new_status = 'invalid'
-                                elif current_status == 'invalid':
-                                    new_status = 'invalid'  # Keep invalid
-                                else:
-                                    new_status = 'disabled'
+                                # Single failure = immediate invalid status (fail_count still tracked for statistics)
+                                new_status = 'invalid'
                                 update_data['status'] = new_status
-                                logger.info(f"Disabling {original_addr}:{port} (failed test, fail_count={new_fail_count}, status={new_status}){' [DUP]' if is_duplicate else ''}")
+                                logger.info(f"Setting invalid {original_addr}:{port} (failed test, fail_count={new_fail_count}, status={new_status}){' [DUP]' if is_duplicate else ''}")
 
                         batch_updates.append((ip_id, update_data))
 
@@ -780,9 +776,21 @@ class CFAutoCheck:
             logger.info(f"CF IP checks completed. {enabled_count} IP-based CFIPs enabled (top {len(top_ip_ports)} IP:port combinations).")
 
             # Sync best IP to Cloudflare A record if enabled
-            if self.sync_to_cf and filtered_results:
-                best_ip = filtered_results[0]['address']
-                self.sync_cf_dns(best_ip)
+            # Apply SYNC_TO_CF_FILTER_PORT only here for DNS sync
+            if self.sync_to_cf and cfst_results:
+                if self.sync_to_cf_filter_port > 0:
+                    # Filter by port and get the first (best) IP according to SELECT_MODE
+                    port_filtered = [r for r in cfst_results if r.get('port') == self.sync_to_cf_filter_port]
+                    if port_filtered:
+                        best_ip = port_filtered[0]['address']
+                        logger.info(f"DNS sync: Selected best IP {best_ip} from port {self.sync_to_cf_filter_port} ({len(port_filtered)} candidates)")
+                        self.sync_cf_dns(best_ip)
+                    else:
+                        logger.warning(f"DNS sync: No IPs found on port {self.sync_to_cf_filter_port}, skipping")
+                else:
+                    # No port filter, use the overall best IP
+                    best_ip = cfst_results[0]['address']
+                    self.sync_cf_dns(best_ip)
 
             # Send Telegram notification (use top_results to match retained/enabled list)
             self.telegram.send_cfip_results(top_results, top_count=self.speed_enable_count)
