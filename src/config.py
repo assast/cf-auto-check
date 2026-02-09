@@ -46,8 +46,8 @@ class Config:
     #   lowest_latency_nonzero - Select by lowest latency among IPs with non-zero download speed
     SELECT_MODE = os.getenv('SELECT_MODE', 'highest_speed')
     
-    # Filter results by port (only use IPs from this port for selection), 0 means all ports
-    FILTER_PORT = int(os.getenv('FILTER_PORT', 443))
+    # Filter results by port for CF DNS sync (only use IPs from this port), 0 means all ports
+    SYNC_TO_CF_FILTER_PORT = int(os.getenv('SYNC_TO_CF_FILTER_PORT', 443))
     
     # Cloudflare DNS API Configuration (for syncing best IP to A record)
     CF_API_TOKEN = os.getenv('CF_API_TOKEN', '')  # Cloudflare API Token with DNS edit permission

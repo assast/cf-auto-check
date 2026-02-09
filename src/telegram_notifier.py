@@ -80,6 +80,7 @@ class TelegramNotifier:
         
         for i, r in enumerate(results[:top_count], 1):
             addr = r.get('address', 'N/A')
+            port = r.get('port', 443)
             latency = r.get('latency', 0)
             speed = r.get('speed', 0)
             region = r.get('region', '')
@@ -88,7 +89,7 @@ class TelegramNotifier:
             speed_str = f"{speed:.2f}MB/s" if speed > 0 else "N/A"
             region_str = f" [{region}]" if region else ""
             
-            lines.append(f"{i}. <code>{addr}</code>{region_str}")
+            lines.append(f"{i}. <code>{addr}:{port}</code>{region_str}")
             lines.append(f"   ⏱ {latency_str} | 📥 {speed_str}")
         
         lines.append("")

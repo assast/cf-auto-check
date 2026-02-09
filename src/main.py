@@ -38,7 +38,7 @@ class CFAutoCheck:
         self.speed_enable_count = Config.SPEED_ENABLE_COUNT
         self.sync_to_cf = Config.SYNC_TO_CF
         self.select_mode = Config.SELECT_MODE
-        self.filter_port = Config.FILTER_PORT
+        self.sync_to_cf_filter_port = Config.SYNC_TO_CF_FILTER_PORT
         self.cf_api_token = Config.CF_API_TOKEN
         self.cf_zone_id = Config.CF_ZONE_ID
         self.cf_record_name = Config.CF_RECORD_NAME
@@ -67,7 +67,7 @@ class CFAutoCheck:
         logger.info(f"API Trigger: {'Enabled on port ' + str(self.api_trigger_port) if self.enable_api_trigger else 'Disabled'}")
         logger.info(f"Test Mode: {self.test_mode}")
         logger.info(f"Select Mode: {self.select_mode}")
-        logger.info(f"Filter Port: {self.filter_port if self.filter_port > 0 else 'All ports'}")
+        logger.info(f"Sync to CF Filter Port: {self.sync_to_cf_filter_port if self.sync_to_cf_filter_port > 0 else 'All ports'}")
         logger.info(f"Sync to CF: {'Enabled' if self.sync_to_cf else 'Disabled'}")
         
         # Start API server if enabled
@@ -621,14 +621,29 @@ class CFAutoCheck:
                 return
 
             # Filter results by port if specified
-            if self.filter_port > 0:
-                filtered_results = [r for r in cfst_results if r.get('port') == self.filter_port]
-                logger.info(f"Filtered to {len(filtered_results)} IPs on port {self.filter_port} (from {len(cfst_results)} total)")
+            if self.sync_to_cf_filter_port > 0:
+                filtered_results = [r for r in cfst_results if r.get('port') == self.sync_to_cf_filter_port]
+                logger.info(f"Filtered to {len(filtered_results)} IPs on port {self.sync_to_cf_filter_port} (from {len(cfst_results)} total)")
             else:
                 filtered_results = cfst_results
 
+            # Filter out IPs with zero download speed for enabling (only enable IPs with confirmed download speed)
+            nonzero_speed_results = [r for r in filtered_results if r.get('speed', 0) > 0]
+            zero_speed_results = [r for r in filtered_results if r.get('speed', 0) == 0]
+            logger.info(f"IPs with non-zero speed: {len(nonzero_speed_results)}, zero speed: {len(zero_speed_results)} (from {len(filtered_results)} filtered)")
+
+            # Priority: non-zero speed IPs first, then fill with zero-speed IPs if needed
+            if len(nonzero_speed_results) >= self.speed_enable_count:
+                # Enough non-zero speed IPs, use only those
+                top_results = nonzero_speed_results[:self.speed_enable_count]
+            else:
+                # Not enough non-zero speed IPs, fill remaining with zero-speed IPs
+                remaining_count = self.speed_enable_count - len(nonzero_speed_results)
+                top_results = nonzero_speed_results + zero_speed_results[:remaining_count]
+                logger.info(f"Not enough non-zero speed IPs ({len(nonzero_speed_results)}), adding {len(top_results) - len(nonzero_speed_results)} zero-speed IPs to reach {self.speed_enable_count}")
+
             # Get top N IPs to enable (using (IP, port) combination)
-            top_ip_ports = set((r['address'], r['port']) for r in filtered_results[:self.speed_enable_count])
+            top_ip_ports = set((r['address'], r['port']) for r in top_results)
 
             logger.info(f"Enabling top {len(top_ip_ports)} IP:port combinations by {self.select_mode}")
 
@@ -761,8 +776,8 @@ class CFAutoCheck:
                 best_ip = filtered_results[0]['address']
                 self.sync_cf_dns(best_ip)
 
-            # Send Telegram notification
-            self.telegram.send_cfip_results(cfst_results, top_count=self.speed_enable_count)
+            # Send Telegram notification (use top_results to match retained/enabled list)
+            self.telegram.send_cfip_results(top_results, top_count=self.speed_enable_count)
 
         except Exception as e:
             logger.error(f"Error checking CF IPs: {str(e)}")
