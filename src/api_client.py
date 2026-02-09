@@ -140,3 +140,39 @@ class ApiClient:
         except Exception as e:
             logger.error(f"Failed to update Outbound {id}: {str(e)}")
             return None
+
+    def batch_update_cf_ips(self, updates, max_workers=10):
+        """Batch update CF IPs using concurrent requests
+        
+        Args:
+            updates: List of (id, data) tuples
+            max_workers: Max concurrent requests (default 10)
+        
+        Returns:
+            Tuple of (success_count, fail_count)
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        success_count = 0
+        fail_count = 0
+        
+        def update_single(id_data):
+            id, data = id_data
+            try:
+                result = self.update_cf_ip(id, data)
+                return (id, True, result)
+            except Exception as e:
+                return (id, False, str(e))
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(update_single, item): item for item in updates}
+            
+            for future in as_completed(futures):
+                id, success, _ = future.result()
+                if success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+        
+        logger.info(f"Batch update completed: {success_count} success, {fail_count} failed")
+        return (success_count, fail_count)

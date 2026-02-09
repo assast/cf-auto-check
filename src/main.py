@@ -653,6 +653,8 @@ class CFAutoCheck:
             # Update API using ip_port_to_cfips mapping (handles port-specific results)
             if self.enable_auto_update:
                 enabled_count = 0
+                batch_updates = []  # Collect all updates for batch processing
+                
                 for (ip_addr, port), cfip_list in self.ip_port_to_cfips.items():
                     result = ip_port_to_result.get((ip_addr, port))
                     
@@ -744,7 +746,7 @@ class CFAutoCheck:
                                 update_data['status'] = new_status
                                 logger.info(f"Disabling {original_addr}:{port} (failed test, fail_count={new_fail_count}, status={new_status}){' [DUP]' if is_duplicate else ''}")
 
-                        self.api_client.update_cf_ip(ip_id, update_data)
+                        batch_updates.append((ip_id, update_data))
 
                 # Update unresolved cfips (these are all domain addresses that couldn't be resolved)
                 # 优选域名无法解析时，不更新状态
@@ -766,8 +768,14 @@ class CFAutoCheck:
                         'country': 'N/A',
                         'isp': 'N/A'
                     }
-                    self.api_client.update_cf_ip(cfip_id, update_data)
-                    logger.info(f"Updated {original_addr} (unresolved, fail_count={new_fail_count}, keeping status={current_status}) [DOMAIN-KEEP]")
+                    batch_updates.append((cfip_id, update_data))
+                    logger.info(f"Updating {original_addr} (unresolved, fail_count={new_fail_count}, keeping status={current_status}) [DOMAIN-KEEP]")
+
+                # Execute batch update with concurrent requests
+                if batch_updates:
+                    logger.info(f"Starting batch update for {len(batch_updates)} CFIPs...")
+                    success, failed = self.api_client.batch_update_cf_ips(batch_updates, max_workers=Config.BATCH_UPDATE_WORKERS)
+                    logger.info(f"Batch update completed: {success} success, {failed} failed")
 
             logger.info(f"CF IP checks completed. {enabled_count} IP-based CFIPs enabled (top {len(top_ip_ports)} IP:port combinations).")
 
