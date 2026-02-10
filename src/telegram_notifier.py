@@ -103,7 +103,14 @@ class TelegramNotifier:
         if not self.enabled:
             return False
         
-        if old_ip and old_ip != new_ip:
+        if old_ip and old_ip == new_ip:
+            message = (
+                f"✅ <b>CF DNS Unchanged</b>\n\n"
+                f"📍 Record: <code>{record_name}</code>\n"
+                f"🟢 IP: <code>{new_ip}</code>\n"
+                f"ℹ️ Already points to best IP, no update needed"
+            )
+        elif old_ip and old_ip != new_ip:
             message = (
                 f"🔄 <b>CF DNS Updated</b>\n\n"
                 f"📍 Record: <code>{record_name}</code>\n"

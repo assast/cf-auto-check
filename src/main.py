@@ -1165,6 +1165,7 @@ class CFAutoCheck:
                 
                 if current_ip == ip_address:
                     logger.info(f"CF DNS A record {self.cf_record_name} already points to {ip_address}, skipping update")
+                    self.telegram.send_dns_update(self.cf_record_name, ip_address, ip_address)
                     return True
                 
                 update_url = f"https://api.cloudflare.com/client/v4/zones/{self.cf_zone_id}/dns_records/{record_id}"
