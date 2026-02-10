@@ -641,28 +641,20 @@ class CFAutoCheck:
 
         latency_results = {}
 
-        # Run latency tests for all ports in parallel
-        with ThreadPoolExecutor(max_workers=len(self.port_groups)) as executor:
-            future_to_port = {}
-            for port, ips in self.port_groups.items():
-                logger.info(f"[Phase1] Submitting latency test for port {port} ({len(ips)} IPs)")
-                future = executor.submit(self.run_latency_test_for_port, port, ips)
-                future_to_port[future] = port
-            
-            for future in as_completed(future_to_port):
-                port = future_to_port[future]
-                try:
-                    results = future.result()
-                    if results:
-                        # Add port info to each result
-                        for r in results:
-                            r['port'] = port
-                        latency_results[port] = results
-                        logger.info(f"[Phase1] Port {port}: {len(results)} IPs passed latency test")
-                    else:
-                        logger.warning(f"[Phase1] Port {port}: No results")
-                except Exception as e:
-                    logger.error(f"[Phase1] Port {port} failed: {str(e)}")
+        # Run latency tests for each port sequentially
+        for port, ips in self.port_groups.items():
+            logger.info(f"[Phase1] Running latency test for port {port} ({len(ips)} IPs)")
+            try:
+                results = self.run_latency_test_for_port(port, ips)
+                if results:
+                    for r in results:
+                        r['port'] = port
+                    latency_results[port] = results
+                    logger.info(f"[Phase1] Port {port}: {len(results)} IPs passed latency test")
+                else:
+                    logger.warning(f"[Phase1] Port {port}: No results")
+            except Exception as e:
+                logger.error(f"[Phase1] Port {port} failed: {str(e)}")
 
         if not latency_results:
             logger.error("[Phase1] No latency results from any port")
@@ -706,27 +698,21 @@ class CFAutoCheck:
             speed_tasks[port] = (selected_ips, self.speed_test_count)
             logger.info(f"[Phase2] Port {port}: selected {len(selected_ips)} IPs for speed test (from {len(results)} latency-tested)")
 
-        # Run speed tests for all ports in parallel
+        # Run speed tests for each port sequentially
         all_speed_results = []
-        with ThreadPoolExecutor(max_workers=len(speed_tasks)) as executor:
-            future_to_port = {}
-            for port, (ips, download_count) in speed_tasks.items():
-                future = executor.submit(self.run_speed_test_for_port, port, ips, download_count)
-                future_to_port[future] = port
-            
-            for future in as_completed(future_to_port):
-                port = future_to_port[future]
-                try:
-                    results = future.result()
-                    if results:
-                        for r in results:
-                            r['port'] = port
-                        all_speed_results.extend(results)
-                        logger.info(f"[Phase2] Port {port}: {len(results)} IPs speed tested")
-                    else:
-                        logger.warning(f"[Phase2] Port {port}: No speed results")
-                except Exception as e:
-                    logger.error(f"[Phase2] Port {port} speed test failed: {str(e)}")
+        for port, (ips, download_count) in speed_tasks.items():
+            logger.info(f"[Phase2] Running speed test for port {port} ({len(ips)} IPs)")
+            try:
+                results = self.run_speed_test_for_port(port, ips, download_count)
+                if results:
+                    for r in results:
+                        r['port'] = port
+                    all_speed_results.extend(results)
+                    logger.info(f"[Phase2] Port {port}: {len(results)} IPs speed tested")
+                else:
+                    logger.warning(f"[Phase2] Port {port}: No speed results")
+            except Exception as e:
+                logger.error(f"[Phase2] Port {port} speed test failed: {str(e)}")
 
         if not all_speed_results:
             logger.error("[Phase2] No speed test results")
