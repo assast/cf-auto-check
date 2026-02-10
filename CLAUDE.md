@@ -112,6 +112,7 @@ docker-compose up -d
   - `/trigger?key=xxx` - 触发全量检测
   - `/trigger?key=xxx&phase=latency` - 只跑延迟测试
   - `/trigger?key=xxx&phase=speed` - 只跑速度测试（用缓存延迟数据）
+  - `/trigger?key=xxx&phase=reprocess` - 使用缓存的延迟+速度数据重新生成结果（不运行 CFST）
   - `/trigger?key=xxx&force=true` - 强制重跑（删除缓存）
   - `/trigger?key=xxx&phase=latency&force=true` - 强制重跑延迟
   - `/status?key=xxx` - 查看状态

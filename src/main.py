@@ -133,7 +133,15 @@ class CFAutoCheck:
                 parsed = urlparse(self.path)
                 query = parse_qs(parsed.query)
                 
-                # Check API key
+                # Health check - no auth required
+                if parsed.path == '/health':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok'}).encode())
+                    return
+                
+                # Check API key for all other endpoints
                 provided_key = query.get('key', [''])[0]
                 if service.api_trigger_key and provided_key != service.api_trigger_key:
                     self.send_response(401)
@@ -153,7 +161,7 @@ class CFAutoCheck:
                     # Check for force and phase parameters
                     force_refresh = query.get('force', [''])[0].lower() in ['true', '1', 'yes']
                     phase = query.get('phase', ['all'])[0].lower()
-                    if phase not in ['all', 'latency', 'speed']:
+                    if phase not in ['all', 'latency', 'speed', 'reprocess']:
                         phase = 'all'
                     
                     # Send TG notification for manual trigger
@@ -188,12 +196,6 @@ class CFAutoCheck:
                         'cron_expression': service.cron_expression if service.enable_cron_scheduler else None
                     }
                     self.wfile.write(json.dumps(status).encode())
-                
-                elif parsed.path == '/health':
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'application/json')
-                    self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'ok'}).encode())
                 
                 else:
                     self.send_response(404)
@@ -250,6 +252,7 @@ class CFAutoCheck:
             phase: 'all' - run both latency and speed phases
                    'latency' - run only latency phase
                    'speed' - run only speed phase (uses cached latency data)
+                   'reprocess' - use cached latency+speed data to regenerate results
         """
         if self.check_running:
             logger.warning("Check already in progress, skipping...")
@@ -840,6 +843,7 @@ class CFAutoCheck:
             phase: 'all' - run both latency and speed phases
                    'latency' - run only latency phase (no API update)
                    'speed' - run only speed phase (uses cached latency data)
+                   'reprocess' - use cached latency+speed data to regenerate results
         """
         try:
             logger.info("Fetching CF IPs...")
@@ -867,9 +871,9 @@ class CFAutoCheck:
                 return
 
             # === Phase 2: Speed Testing ===
-            # If we didn't run latency phase (speed-only mode), load from cache
+            # If we didn't run latency phase (speed-only or reprocess mode), load from cache
             if latency_results is None:
-                logger.info("[Phase2] Loading cached latency results...")
+                logger.info("Loading cached latency results...")
                 latency_results = {}
                 for port, ips in self.port_groups.items():
                     latency_file = os.path.join(self.cfst_dir, f'latency_{port}.csv')
@@ -879,19 +883,53 @@ class CFAutoCheck:
                             for r in cached:
                                 r['port'] = port
                             latency_results[port] = cached
-                            logger.info(f"[Phase2] Loaded {len(cached)} cached latency results for port {port}")
+                            logger.info(f"Loaded {len(cached)} cached latency results for port {port}")
                     else:
-                        logger.warning(f"[Phase2] No cached latency results for port {port}, run phase=latency first")
+                        logger.warning(f"No cached latency results for port {port}, run phase=latency first")
                 
                 if not latency_results:
-                    logger.error("[Phase2] No cached latency data available. Run phase=latency or phase=all first.")
+                    logger.error("No cached latency data available. Run phase=latency or phase=all first.")
                     return
 
-            cfst_results = self.run_speed_phase(latency_results)
+            # Reprocess mode: load cached speed results instead of running CFST
+            if phase == 'reprocess':
+                logger.info("[Reprocess] Loading cached speed results...")
+                cfst_results = []
+                for port in self.port_groups.keys():
+                    speed_file = os.path.join(self.cfst_dir, f'speed_{port}.csv')
+                    if os.path.exists(speed_file):
+                        cached = self.parse_cfst_results(speed_file)
+                        if cached:
+                            for r in cached:
+                                r['port'] = port
+                            cfst_results.extend(cached)
+                            logger.info(f"[Reprocess] Loaded {len(cached)} cached speed results for port {port}")
+                    else:
+                        logger.warning(f"[Reprocess] No cached speed results for port {port}")
+                
+                if not cfst_results:
+                    logger.error("[Reprocess] No cached speed data available. Run a full test first.")
+                    return
+                
+                # Sort results based on select_mode
+                if self.select_mode == 'lowest_latency':
+                    cfst_results.sort(key=lambda x: (x['latency'], -x['speed']))
+                elif self.select_mode == 'lowest_latency_nonzero':
+                    nonzero = [r for r in cfst_results if r['speed'] > 0]
+                    zero = [r for r in cfst_results if r['speed'] == 0]
+                    nonzero.sort(key=lambda x: (x['latency'], -x['speed']))
+                    zero.sort(key=lambda x: x['latency'])
+                    cfst_results = nonzero + zero
+                else:  # highest_speed
+                    cfst_results.sort(key=lambda x: (-x['speed'], x['latency']))
+                
+                logger.info(f"[Reprocess] Loaded {len(cfst_results)} total speed results from cache")
+            else:
+                cfst_results = self.run_speed_phase(latency_results)
 
-            if cfst_results is None:
-                logger.error("Speed phase failed, no results to update")
-                return
+                if cfst_results is None:
+                    logger.error("Speed phase failed, no results to update")
+                    return
 
             # === Update API with results ===
             self._update_cfip_results(cfips, cfst_results, latency_results)
