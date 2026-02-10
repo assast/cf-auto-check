@@ -81,8 +81,8 @@ docker-compose up -d
 4. 结果缓存到 `latency_{port}.csv`
 
 **Phase 2: 速度测试** (`run_speed_phase`)
-1. 从 Phase 1 结果中按延迟排序，每端口取前 `SPEED_TEST_COUNT` 个 IP
-2. 对每个端口组并行运行 CFST（含下载测速）
+1. 从 Phase 1 结果中按延迟排序，所有端口合计取前 `SPEED_TEST_COUNT` 个 IP（按端口比例分配）
+2. 对每个端口组运行 CFST（含下载测速）
 3. 结果缓存到 `speed_{port}.csv`
 4. 按 `SELECT_MODE` 排序，保留前 `SPEED_ENABLE_COUNT` 个
 
@@ -133,10 +133,8 @@ docker-compose up -d
 - `TEST_MODE=all` - 测试所有类型
 
 #### 测试配置
-- `LATENCY_THREADS=200` - Phase 1 延迟测试线程数（CFST -n 参数），默认 200，最大 1000
-- `CONCURRENT_TESTS=5` - Phase 2 速度测试时的 CFST -n 参数
-- `SPEED_TEST_COUNT=20` - Phase 2 每端口下载测速数量（-dn 参数）
-- `SPEED_TEST_COUNT_443=30` - Phase 2 端口 443 下载测速数量
+- `LATENCY_THREADS=200` - Phase 1/Phase 2 线程数（CFST -n 参数），默认 200，最大 1000
+- `SPEED_TEST_COUNT=20` - Phase 2 所有端口合计下载测速数量（按端口比例分配）
 - `SPEED_ENABLE_COUNT=50` - 选择速度最高的前 M 个 IP 设为启用状态
 
 ### 重要实现细节

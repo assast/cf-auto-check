@@ -685,17 +685,37 @@ class CFAutoCheck:
             List of all speed test results, sorted by select_mode, or None
         """
         logger.info("=" * 60)
-        logger.info(f"[Phase2] SPEED TESTING (top {self.speed_test_count} per port)")
+        logger.info(f"[Phase2] SPEED TESTING (top {self.speed_test_count} total across all ports)")
         logger.info("=" * 60)
 
-        # Select top IPs by latency for each port
+        # Distribute speed_test_count across ports proportionally by number of latency-tested IPs
+        total_latency_ips = sum(len(r) for r in latency_results.values())
         speed_tasks = {}  # port -> list of IPs to speed test
+        
+        # Calculate proportional allocation per port
+        port_allocations = {}
+        remaining = self.speed_test_count
+        ports = list(latency_results.keys())
+        
+        for i, port in enumerate(ports):
+            results = latency_results[port]
+            if i == len(ports) - 1:
+                # Last port gets the remainder to ensure exact total
+                allocation = remaining
+            else:
+                # Proportional allocation based on number of latency-tested IPs
+                proportion = len(results) / total_latency_ips if total_latency_ips > 0 else 1.0 / len(ports)
+                allocation = max(1, round(self.speed_test_count * proportion))
+                remaining -= allocation
+            port_allocations[port] = min(allocation, len(results))  # Can't select more than available
+        
         for port, results in latency_results.items():
             # Sort by latency
             sorted_results = sorted(results, key=lambda x: x['latency'])
-            selected = sorted_results[:self.speed_test_count]
+            count = port_allocations.get(port, 1)
+            selected = sorted_results[:count]
             selected_ips = [r['address'] for r in selected]
-            speed_tasks[port] = (selected_ips, self.speed_test_count)
+            speed_tasks[port] = (selected_ips, count)
             logger.info(f"[Phase2] Port {port}: selected {len(selected_ips)} IPs for speed test (from {len(results)} latency-tested)")
 
         # Run speed tests for each port sequentially
