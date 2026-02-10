@@ -141,8 +141,90 @@ class ApiClient:
             logger.error(f"Failed to update Outbound {id}: {str(e)}")
             return None
 
+    def batch_update_cf_ips_api(self, updates):
+        """Batch update CF IPs using the batch update API endpoint
+        
+        Args:
+            updates: List of (id, data) tuples where data is a dict of fields to update
+        
+        Returns:
+            Tuple of (success_count, fail_count)
+        """
+        if not updates:
+            return (0, 0)
+        
+        # Convert (id, data) tuples to items with id included
+        items = []
+        for ip_id, data in updates:
+            item = {'id': ip_id}
+            item.update(data)
+            items.append(item)
+        
+        total_count = len(items)
+        logger.info(f"Starting batch update API for {total_count} items...")
+        
+        # Send in chunks of 50 (matching backend BATCH_SIZE)
+        CHUNK_SIZE = 50
+        total_success = 0
+        total_failed = 0
+        
+        for i in range(0, len(items), CHUNK_SIZE):
+            chunk = items[i:i + CHUNK_SIZE]
+            try:
+                result = self._retry_request('POST', '/api/cfip/batch/update', {'items': chunk})
+                if result and result.get('success'):
+                    chunk_success = result.get('data', {}).get('success', len(chunk))
+                    chunk_failed = result.get('data', {}).get('failed', 0)
+                    total_success += chunk_success
+                    total_failed += chunk_failed
+                else:
+                    total_failed += len(chunk)
+                
+                progress_pct = min(i + len(chunk), total_count) / total_count * 100
+                logger.info(f"Batch update progress: {min(i + len(chunk), total_count)}/{total_count} ({progress_pct:.1f}%)")
+            except Exception as e:
+                logger.warning(f"Batch update API failed for chunk {i//CHUNK_SIZE + 1}: {str(e)}, falling back to individual updates")
+                # Fallback to individual updates for this chunk
+                for item in chunk:
+                    ip_id = item.pop('id')
+                    try:
+                        self.update_cf_ip(ip_id, item)
+                        total_success += 1
+                    except Exception as e2:
+                        total_failed += 1
+                        logger.error(f"Individual update failed for {ip_id}: {str(e2)}")
+        
+        logger.info(f"Batch update completed: {total_success} success, {total_failed} failed")
+        return (total_success, total_failed)
+
+    def batch_status_cf_ips(self, ids, status):
+        """Batch update status for multiple CF IPs using the batch status API
+        
+        Args:
+            ids: List of CF IP IDs
+            status: New status ('enabled', 'disabled', 'invalid')
+        
+        Returns:
+            bool: True if successful
+        """
+        if not ids:
+            return True
+        
+        try:
+            result = self._retry_request('POST', '/api/cfip/batch/status', {
+                'ids': ids,
+                'status': status
+            })
+            if result and result.get('success'):
+                logger.info(f"Batch status update: {len(ids)} IPs set to {status}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Batch status update failed: {str(e)}")
+            return False
+
     def batch_update_cf_ips(self, updates, max_workers=10):
-        """Batch update CF IPs using concurrent requests
+        """Batch update CF IPs using concurrent requests (legacy fallback)
         
         Args:
             updates: List of (id, data) tuples
@@ -158,7 +240,7 @@ class ApiClient:
         total_count = len(updates)
         completed_count = 0
         
-        logger.info(f"Starting batch update for {total_count} items...")
+        logger.info(f"Starting batch update (concurrent) for {total_count} items...")
         
         def update_single(id_data):
             id, data = id_data
@@ -179,7 +261,6 @@ class ApiClient:
                 else:
                     fail_count += 1
                 
-                # 每10个或者最后一个时显示进度
                 if completed_count % 10 == 0 or completed_count == total_count:
                     progress_pct = (completed_count / total_count) * 100
                     logger.info(f"Progress: {completed_count}/{total_count} ({progress_pct:.1f}%) - Success: {success_count}, Failed: {fail_count}")

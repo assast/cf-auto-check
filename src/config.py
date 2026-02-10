@@ -27,13 +27,11 @@ class Config:
     API_TRIGGER_PORT = int(os.getenv('API_TRIGGER_PORT', 8080))
     
     # CFST Configuration
-    CONCURRENT_TESTS = int(os.getenv('CONCURRENT_TESTS', 5))
+    LATENCY_THREADS = int(os.getenv('LATENCY_THREADS', 200))  # CFST -n threads for both phases
 
     # Download speed test count (CFST -dn parameter)
-    SPEED_TEST_COUNT_443 = int(os.getenv('SPEED_TEST_COUNT_443', 30))  # For port 443 (usually has most IPs)
-    SPEED_TEST_COUNT = int(os.getenv('SPEED_TEST_COUNT', 20))  # For non-443 ports
+    SPEED_TEST_COUNT = int(os.getenv('SPEED_TEST_COUNT', 20))  # Top N lowest latency IPs to speed test
     SPEED_ENABLE_COUNT = int(os.getenv('SPEED_ENABLE_COUNT', 50))   # Enable top N IPs by speed
-    BATCH_UPDATE_WORKERS = int(os.getenv('BATCH_UPDATE_WORKERS', 10))  # Concurrent workers for batch update
     
     # Result cache TTL in hours (skip testing if result file exists within this period)
     RESULT_CACHE_HOURS = float(os.getenv('RESULT_CACHE_HOURS', 8))

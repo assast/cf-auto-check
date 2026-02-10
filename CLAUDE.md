@@ -44,18 +44,23 @@ docker-compose up -d
 
 1. **CFAutoCheck (src/main.py)** - 主服务类
    - 管理整个检测生命周期
+   - **两阶段分步执行**：
+     - Phase 1 (延迟测试)：使用 CFST `-dd` 纯延迟测试，高并发线程（LATENCY_THREADS=200）
+     - Phase 2 (速度测试)：对延迟最优的 Top N 个 IP 进行下载速度测试
    - 支持两种运行模式：
      - Cron 调度器：按 cron 表达式定期执行检测
      - API 触发器：通过 HTTP API 手动触发检测
    - 处理 CFST 二进制的自动下载和执行
    - 实现域名解析（支持多种方法：socket、dig、nslookup）
-   - 按端口分组测试 IP
+   - 按端口分组测试 IP，多端口并行执行
 
 2. **ApiClient (src/api_client.py)** - API 客户端
    - 实现会话令牌认证机制
    - 自动重试逻辑（可配置次数和延迟）
    - 401 错误时自动重新登录
    - 支持三种资源类型：cfip、proxyip、outbound
+   - **批量 API**：`batch_update_cf_ips_api()` 调用 `/api/cfip/batch/update` 批量更新
+   - **批量状态**：`batch_status_cf_ips()` 调用 `/api/cfip/batch/status`
 
 3. **TelegramNotifier (src/telegram_notifier.py)** - Telegram 通知
    - 独立的代理配置（仅用于 Telegram API）
@@ -67,21 +72,32 @@ docker-compose up -d
 
 ### 关键工作流程
 
-#### IP 检测流程 (check_cf_ips)
+#### 两阶段 IP 检测流程 (check_cf_ips)
+
+**Phase 1: 延迟测试** (`run_latency_phase`)
 1. 从 API 获取 CF IP 列表
-2. 域名解析：将域名解析为 IP 地址（使用多种方法确保成功）
-3. 按端口分组：将 IP 按端口分组（支持多端口测试）
-4. **CFST 测试**：
-   - 对所有 IP 运行 CFST 测试（延迟 + 速度）
-   - CFST 会先测试所有 IP 的延迟，然后对延迟最低的前 N 个 IP 进行速度测试（N = SPEED_TEST_COUNT）
-   - 按下载速度排序（降序，越高越好）
-   - 选择速度最高的前 M 个 IP（M = SPEED_ENABLE_COUNT）
-5. 更新 API：
-   - Top M 个 IP 设置为 enabled
-   - 其他 IP 设置为 disabled
-   - 更新 remark 格式：`速度|延迟|地区 原始地址`
-   - 获取 IP 地理信息（使用 ipapi.is API）
-6. 发送 Telegram 通知
+2. 域名解析 + 按端口分组
+3. 对每个端口组并行运行 CFST（`-dd` 禁用下载，`-n LATENCY_THREADS`）
+4. 结果缓存到 `latency_{port}.csv`
+
+**Phase 2: 速度测试** (`run_speed_phase`)
+1. 从 Phase 1 结果中按延迟排序，每端口取前 `SPEED_TEST_COUNT` 个 IP
+2. 对每个端口组并行运行 CFST（含下载测速）
+3. 结果缓存到 `speed_{port}.csv`
+4. 按 `SELECT_MODE` 排序，保留前 `SPEED_ENABLE_COUNT` 个
+
+**API 更新**
+5. 使用 `/api/cfip/batch/update` 批量更新所有 CFIP 的测试数据
+6. Top M 个 IP 设置为 enabled，其余 disabled
+7. 获取 IP 地理信息（ipapi.is API）
+8. 同步 CF DNS + 发送 Telegram 通知
+
+#### 缓存和重跑支持
+
+- **缓存文件**：`latency_{port}.csv`（Phase 1）、`speed_{port}.csv`（Phase 2）
+- **重跑**：使用缓存数据，无需重新测试
+- **强制重跑**：`force=true` 删除缓存后重新测试
+- **单阶段重跑**：`phase=latency` 或 `phase=speed` 独立运行
 
 #### CFST 集成
 - 自动检测平台（macOS/Linux，ARM/AMD64）
@@ -93,7 +109,11 @@ docker-compose up -d
 #### API 触发器
 - HTTP 服务器监听指定端口
 - 端点：
-  - `/trigger?key=xxx` - 触发检测
+  - `/trigger?key=xxx` - 触发全量检测
+  - `/trigger?key=xxx&phase=latency` - 只跑延迟测试
+  - `/trigger?key=xxx&phase=speed` - 只跑速度测试（用缓存延迟数据）
+  - `/trigger?key=xxx&force=true` - 强制重跑（删除缓存）
+  - `/trigger?key=xxx&phase=latency&force=true` - 强制重跑延迟
   - `/status?key=xxx` - 查看状态
   - `/health` - 健康检查
 - API key 验证
@@ -113,39 +133,48 @@ docker-compose up -d
 - `TEST_MODE=all` - 测试所有类型
 
 #### 测试配置
-- `SPEED_TEST_COUNT=20` - CFST 下载测速数量（-dn 参数），CFST 会先测试所有 IP 的延迟，然后对延迟最低的前 N 个 IP 进行速度测试
+- `LATENCY_THREADS=200` - Phase 1 延迟测试线程数（CFST -n 参数），默认 200，最大 1000
+- `CONCURRENT_TESTS=5` - Phase 2 速度测试时的 CFST -n 参数
+- `SPEED_TEST_COUNT=20` - Phase 2 每端口下载测速数量（-dn 参数）
+- `SPEED_TEST_COUNT_443=30` - Phase 2 端口 443 下载测速数量
 - `SPEED_ENABLE_COUNT=50` - 选择速度最高的前 M 个 IP 设为启用状态
 
 ### 重要实现细节
 
-1. **CFST 测试策略**：
-   - CFST 内部会先测试所有 IP 的延迟，然后按延迟排序
-   - 对延迟最低的前 N 个 IP 进行速度测试（N 由 SPEED_TEST_COUNT 控制，对应 CFST 的 -dn 参数）
-   - 最终按速度排序，选择速度最高的前 M 个 IP 设为启用（M 由 SPEED_ENABLE_COUNT 控制）
+1. **两阶段分步策略**：
+   - Phase 1：CFST `-dd` 纯延迟测试，高并发（200线程），结果按延迟排序
+   - Phase 2：对 Phase 1 延迟最低的 Top N 个 IP 进行速度测试
+   - 两阶段独立缓存，支持单独/合并重跑
+   - 多端口在同一阶段内并行执行
 
-2. **域名解析策略**：使用三种方法确保域名解析成功
+2. **批量 API 更新**：
+   - 使用 `/api/cfip/batch/update` 一次性更新多条记录
+   - D1 `db.batch()` 批量执行，每批 50 条
+   - 失败时自动降级为逐条 PUT 请求
+
+3. **域名解析策略**：使用三种方法确保域名解析成功
    - socket.gethostbyname
    - socket.getaddrinfo
    - 系统命令（dig/nslookup）
 
-3. **IP 到 cfip 的映射**：维护 `ip_to_cfip` 字典，因为多个域名可能解析到同一 IP
+4. **IP 到 cfip 的映射**：维护 `ip_to_cfip` 字典，因为多个域名可能解析到同一 IP
 
-4. **未解析域名处理**：无法解析的域名会被标记为 disabled，remark 设置为 "N/A|N/A|N/A 原始地址"
+5. **未解析域名处理**：无法解析的域名会保持当前状态，remark 设置为 "N/A|N/A|N/A 原始地址"
 
-5. **并发控制**：使用 `check_running` 标志防止并发检测
+6. **并发控制**：使用 `check_running` 标志防止并发检测
 
-6. **信号处理**：正确处理 SIGINT 和 SIGTERM 以实现优雅关闭
+7. **信号处理**：正确处理 SIGINT 和 SIGTERM 以实现优雅关闭
 
-7. **速度单位转换**：CFST 返回 MB/s，API 需要 KB/s（乘以 1024）
+8. **速度单位转换**：CFST 返回 MB/s，API 需要 KB/s（乘以 1024）
 
-8. **端口信息保留**：每个结果都保留端口信息，确保能正确按端口分组
+9. **端口信息保留**：每个结果都保留端口信息，确保能正确按端口分组
 
 ### 文件结构
 ```
 src/
 ├── __init__.py
-├── main.py              # 主服务类，CFST 集成，调度器
-├── api_client.py        # API 交互，认证，重试逻辑
+├── main.py              # 主服务类，两阶段 CFST 集成，调度器
+├── api_client.py        # API 交互，批量更新，认证，重试逻辑
 ├── telegram_notifier.py # Telegram 通知服务
 ├── config.py            # 配置加载
 └── logger.py            # 日志设置
@@ -153,7 +182,9 @@ src/
 cfst_data/               # CFST 二进制和结果文件（自动创建）
 ├── cfst                 # CFST 二进制（自动下载）
 ├── ips_{port}.txt       # 每个端口的 IP 列表
-└── result_{port}.csv    # 每个端口的测试结果
+├── latency_{port}.csv   # Phase 1: 每个端口的延迟测试结果
+├── speed_ips_{port}.txt # Phase 2: 每个端口选中的 IP 列表
+└── speed_{port}.csv     # Phase 2: 每个端口的速度测试结果
 ```
 
 ## Development Notes
