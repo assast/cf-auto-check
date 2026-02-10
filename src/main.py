@@ -935,9 +935,23 @@ class CFAutoCheck:
 
         # Update API
         if self.enable_auto_update:
-            # Pre-fetch IP info for all unique IPs in parallel
-            unique_ips = set(ip for ip, _ in self.ip_port_to_cfips.keys())
-            self._prefetch_ip_info(unique_ips)
+            # Only fetch IP info via API for top enabled IPs that lack CFST region
+            top_ips_set = set(ip for ip, _ in top_ip_ports)
+            ips_need_api = set()
+            for (ip_addr, port) in top_ip_ports:
+                result = ip_port_to_result.get((ip_addr, port))
+                latency_result = ip_port_to_latency.get((ip_addr, port))
+                effective = result or latency_result
+                if effective:
+                    region = effective.get('region', '').strip()
+                    if not region:
+                        ips_need_api.add(ip_addr)
+            
+            if ips_need_api:
+                self._prefetch_ip_info(ips_need_api)
+            else:
+                self._ip_info_cache = {}
+                logger.info(f"All top IPs have CFST region info, skipping IP info API calls")
             
             enabled_count = 0
             batch_updates = []
@@ -956,15 +970,22 @@ class CFAutoCheck:
                 dup_count = self.ip_occurrence_count.get(ip_addr, 0)
                 dup_mark = f"[DUP:{dup_count}] " if is_duplicate else ""
                 
-                # Get IP info from pre-fetched cache
+                # Get country/ISP: prioritize CFST region code, fall back to API
                 if effective_result:
-                    ip_info = self._ip_info_cache.get(ip_addr)
-                    if ip_info:
-                        country = ip_info['country']
-                        isp = ip_info['isp']
+                    cfst_region = effective_result.get('region', '').strip()
+                    if cfst_region:
+                        country = cfst_region
+                        # Try to get ISP from API cache if available
+                        ip_info = self._ip_info_cache.get(ip_addr)
+                        isp = ip_info['isp'] if ip_info else 'N/A'
                     else:
-                        country = effective_result.get('region') or 'N/A'
-                        isp = 'N/A'
+                        ip_info = self._ip_info_cache.get(ip_addr)
+                        if ip_info:
+                            country = ip_info['country']
+                            isp = ip_info['isp']
+                        else:
+                            country = 'N/A'
+                            isp = 'N/A'
                 
                 for cfip in cfip_list:
                     ip_id = cfip.get('id')
