@@ -691,35 +691,30 @@ class CFAutoCheck:
         logger.info(f"[Phase2] SPEED TESTING (top {self.speed_test_count} total across all ports)")
         logger.info("=" * 60)
 
-        # Distribute speed_test_count across ports proportionally by number of latency-tested IPs
-        total_latency_ips = sum(len(r) for r in latency_results.values())
-        speed_tasks = {}  # port -> list of IPs to speed test
-        
-        # Calculate proportional allocation per port
-        port_allocations = {}
-        remaining = self.speed_test_count
-        ports = list(latency_results.keys())
-        
-        for i, port in enumerate(ports):
-            results = latency_results[port]
-            if i == len(ports) - 1:
-                # Last port gets the remainder to ensure exact total
-                allocation = remaining
-            else:
-                # Proportional allocation based on number of latency-tested IPs
-                proportion = len(results) / total_latency_ips if total_latency_ips > 0 else 1.0 / len(ports)
-                allocation = max(1, round(self.speed_test_count * proportion))
-                remaining -= allocation
-            port_allocations[port] = min(allocation, len(results))  # Can't select more than available
-        
+        # Merge all latency results, sort globally by latency, pick top N
+        all_latency = []
         for port, results in latency_results.items():
-            # Sort by latency
-            sorted_results = sorted(results, key=lambda x: x['latency'])
-            count = port_allocations.get(port, 1)
-            selected = sorted_results[:count]
-            selected_ips = [r['address'] for r in selected]
-            speed_tasks[port] = (selected_ips, count)
-            logger.info(f"[Phase2] Port {port}: selected {len(selected_ips)} IPs for speed test (from {len(results)} latency-tested)")
+            for r in results:
+                all_latency.append({**r, 'port': port})
+        all_latency.sort(key=lambda x: x['latency'])
+        
+        # Select top SPEED_TEST_COUNT IPs globally by lowest latency
+        selected_global = all_latency[:self.speed_test_count]
+        logger.info(f"[Phase2] Selected {len(selected_global)} IPs globally by lowest latency (from {len(all_latency)} total)")
+        
+        # Group selected IPs back by port for speed testing
+        speed_tasks = {}  # port -> (list of IPs, count)
+        for r in selected_global:
+            port = r['port']
+            if port not in speed_tasks:
+                speed_tasks[port] = ([], 0)
+            ips, count = speed_tasks[port]
+            ips.append(r['address'])
+            speed_tasks[port] = (ips, len(ips))
+        
+        for port, (ips, count) in speed_tasks.items():
+            total_for_port = len(latency_results.get(port, []))
+            logger.info(f"[Phase2] Port {port}: selected {count} IPs for speed test (from {total_for_port} latency-tested)")
 
         # Run speed tests for each port sequentially
         all_speed_results = []
