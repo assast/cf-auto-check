@@ -32,6 +32,8 @@ class Config:
     # Download speed test count (CFST -dn parameter)
     SPEED_TEST_COUNT = int(os.getenv('SPEED_TEST_COUNT', 20))  # Top N lowest latency IPs to speed test (total across all ports)
     SPEED_TEST_URL = os.getenv('SPEED_TEST_URL', 'https://speed.cloudflare.com/__down?bytes=200000000')  # Download test URL (must be behind Cloudflare CDN)
+    MAX_LATENCY = int(os.getenv('MAX_LATENCY', 9999))  # Max average latency in ms (-tl parameter)
+    MAX_LOSS = float(os.getenv('MAX_LOSS', 1.0))       # Max packet loss rate 0.0-1.0 (-tlp parameter)
     SPEED_ENABLE_COUNT = int(os.getenv('SPEED_ENABLE_COUNT', 50))   # Enable top N IPs by speed
     
     # Result cache TTL in hours (skip testing if result file exists within this period)

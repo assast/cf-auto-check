@@ -135,6 +135,8 @@ docker-compose up -d
 #### 测试配置
 - `LATENCY_THREADS=200` - Phase 1/Phase 2 线程数（CFST -n 参数），默认 200，最大 1000
 - `SPEED_TEST_COUNT=20` - Phase 2 所有端口合计下载测速数量（按端口比例分配）
+- `MAX_LATENCY=9999` - 平均延迟上限（ms），超过此值的 IP 将被过滤（-tl 参数）
+- `MAX_LOSS=1.0` - 丢包率上限（0.0-1.0），高于此值的 IP 将被过滤（-tlp 参数）
 - `SPEED_ENABLE_COUNT=50` - 选择速度最高的前 M 个 IP 设为启用状态
 
 ### 重要实现细节

@@ -36,6 +36,8 @@ class CFAutoCheck:
         self.api_trigger_port = Config.API_TRIGGER_PORT
         self.speed_test_count = Config.SPEED_TEST_COUNT
         self.speed_test_url = Config.SPEED_TEST_URL
+        self.max_latency = Config.MAX_LATENCY
+        self.max_loss = Config.MAX_LOSS
         self.speed_enable_count = Config.SPEED_ENABLE_COUNT
         self.sync_to_cf = Config.SYNC_TO_CF
         self.select_mode = Config.SELECT_MODE
@@ -562,6 +564,8 @@ class CFAutoCheck:
             '-tp', str(port),
             '-n', str(self.latency_threads),
             '-dd',  # Disable download testing
+            '-tl', str(self.max_latency),
+            '-tlp', str(self.max_loss),
             '-p', str(len(ips)),  # Output all results to file
             '-debug'
         ]
@@ -621,6 +625,8 @@ class CFAutoCheck:
             '-n', str(self.latency_threads),
             '-url', self.speed_test_url,
             '-dn', str(dn),
+            '-tl', str(self.max_latency),
+            '-tlp', str(self.max_loss),
             '-p', str(len(ips)),  # Output all results to file
             '-debug'
         ]
