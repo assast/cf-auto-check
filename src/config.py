@@ -30,7 +30,8 @@ class Config:
     LATENCY_THREADS = int(os.getenv('LATENCY_THREADS', 200))  # CFST -n threads for both phases
 
     # Download speed test count (CFST -dn parameter)
-    SPEED_TEST_COUNT = int(os.getenv('SPEED_TEST_COUNT', 20))  # Top N lowest latency IPs to speed test
+    SPEED_TEST_COUNT = int(os.getenv('SPEED_TEST_COUNT', 20))  # Top N lowest latency IPs to speed test (total across all ports)
+    SPEED_TEST_URL = os.getenv('SPEED_TEST_URL', 'https://speed.cloudflare.com/__down?bytes=200000000')  # Download test URL (must be behind Cloudflare CDN)
     SPEED_ENABLE_COUNT = int(os.getenv('SPEED_ENABLE_COUNT', 50))   # Enable top N IPs by speed
     
     # Result cache TTL in hours (skip testing if result file exists within this period)

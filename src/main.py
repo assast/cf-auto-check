@@ -35,6 +35,7 @@ class CFAutoCheck:
         self.api_trigger_key = Config.API_TRIGGER_KEY
         self.api_trigger_port = Config.API_TRIGGER_PORT
         self.speed_test_count = Config.SPEED_TEST_COUNT
+        self.speed_test_url = Config.SPEED_TEST_URL
         self.speed_enable_count = Config.SPEED_ENABLE_COUNT
         self.sync_to_cf = Config.SYNC_TO_CF
         self.select_mode = Config.SELECT_MODE
@@ -566,6 +567,7 @@ class CFAutoCheck:
         ]
 
         logger.info(f"[Phase1] Running latency test for port {port} with {len(ips)} IPs (threads: {self.latency_threads})")
+        logger.info(f"[Phase1] Command: {' '.join(cmd)}")
 
         if self._run_cfst_process(cmd, port):
             return self.parse_cfst_results(latency_result_file)
@@ -617,13 +619,14 @@ class CFAutoCheck:
             '-o', speed_result_file,
             '-tp', str(port),
             '-n', str(self.latency_threads),
-            '-url', 'https://download.parallels.com/desktop/v17/17.1.1-51537/ParallelsDesktop-17.1.1-51537.dmg',
+            '-url', self.speed_test_url,
             '-dn', str(dn),
             '-p', str(len(ips)),  # Output all results to file
             '-debug'
         ]
 
         logger.info(f"[Phase2] Running speed test for port {port} with {len(ips)} IPs (download test: {dn} IPs)")
+        logger.info(f"[Phase2] Command: {' '.join(cmd)}")
 
         if self._run_cfst_process(cmd, port):
             return self.parse_cfst_results(speed_result_file)
