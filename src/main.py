@@ -454,20 +454,52 @@ class CFAutoCheck:
 
     def _get_ip_info(self, ip_addr):
         """Get IP information from ipapi.is API"""
+        # Check cache first
+        if hasattr(self, '_ip_info_cache') and ip_addr in self._ip_info_cache:
+            return self._ip_info_cache[ip_addr]
         try:
             import requests
             response = requests.get(f'https://api.ipapi.is/?q={ip_addr}', timeout=10)
             if response.ok:
                 data = response.json()
-                return {
+                info = {
                     'country': data.get('location', {}).get('country_code') or 'N/A',
                     'city': data.get('location', {}).get('city') or 'N/A',
                     'isp': data.get('asn', {}).get('org') or 'N/A',
                     'asn': f"AS{data.get('asn', {}).get('asn')}" if data.get('asn', {}).get('asn') else 'N/A'
                 }
+                if not hasattr(self, '_ip_info_cache'):
+                    self._ip_info_cache = {}
+                self._ip_info_cache[ip_addr] = info
+                return info
         except Exception as e:
             logger.debug(f"Failed to get IP info for {ip_addr}: {str(e)}")
         return None
+
+    def _prefetch_ip_info(self, unique_ips):
+        """Pre-fetch IP info for all unique IPs in parallel using ThreadPoolExecutor"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        if not unique_ips:
+            return
+        
+        self._ip_info_cache = {}
+        logger.info(f"Pre-fetching IP info for {len(unique_ips)} unique IPs...")
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(self._get_ip_info, ip): ip for ip in unique_ips}
+            done_count = 0
+            for future in as_completed(futures):
+                done_count += 1
+                ip = futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        self._ip_info_cache[ip] = result
+                except Exception as e:
+                    logger.debug(f"Failed to get IP info for {ip}: {str(e)}")
+        
+        logger.info(f"IP info pre-fetch completed: {len(self._ip_info_cache)}/{len(unique_ips)} succeeded")
 
     def _run_cfst_process(self, cmd, port, timeout=600):
         """Run a CFST subprocess with real-time output streaming
@@ -903,6 +935,10 @@ class CFAutoCheck:
 
         # Update API
         if self.enable_auto_update:
+            # Pre-fetch IP info for all unique IPs in parallel
+            unique_ips = set(ip for ip, _ in self.ip_port_to_cfips.keys())
+            self._prefetch_ip_info(unique_ips)
+            
             enabled_count = 0
             batch_updates = []
             enable_ids = []   # IDs to set enabled
@@ -920,9 +956,9 @@ class CFAutoCheck:
                 dup_count = self.ip_occurrence_count.get(ip_addr, 0)
                 dup_mark = f"[DUP:{dup_count}] " if is_duplicate else ""
                 
-                # Get IP info once for all cfips mapping to this (IP, port)
+                # Get IP info from pre-fetched cache
                 if effective_result:
-                    ip_info = self._get_ip_info(ip_addr)
+                    ip_info = self._ip_info_cache.get(ip_addr)
                     if ip_info:
                         country = ip_info['country']
                         isp = ip_info['isp']
