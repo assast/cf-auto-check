@@ -118,3 +118,23 @@ class TelegramNotifier:
             )
         
         return self.send_message(message)
+
+    def send_trigger_notification(self, phase: str = 'all', force: bool = False):
+        """Send notification when a manual check is triggered via API"""
+        if not self.enabled:
+            return False
+        
+        phase_labels = {
+            'all': '全量检测 (延迟+速度)',
+            'latency': '仅延迟测试',
+            'speed': '仅速度测试'
+        }
+        phase_label = phase_labels.get(phase, phase)
+        force_label = ' [强制刷新]' if force else ''
+        
+        message = (
+            f"🔔 <b>手动触发检测</b>\n\n"
+            f"📋 模式: {phase_label}{force_label}\n"
+            f"⏰ 时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        return self.send_message(message)
