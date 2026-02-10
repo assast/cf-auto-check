@@ -153,6 +153,9 @@ class CFAutoCheck:
                     if phase not in ['all', 'latency', 'speed']:
                         phase = 'all'
                     
+                    # Send TG notification for manual trigger
+                    service.telegram.send_trigger_notification(phase=phase, force=force_refresh)
+                    
                     # Trigger check in background thread
                     def run_async_check():
                         try:
