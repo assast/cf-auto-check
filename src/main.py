@@ -600,7 +600,7 @@ class CFAutoCheck:
             '-n', str(self.latency_threads),
             '-dd',  # Disable download testing
             '-tl', str(self.max_latency),
-            '-tlp', str(self.max_loss),
+            '-tlr', str(self.max_loss),
             '-p', str(len(ips)),  # Output all results to file
             '-debug'
         ]
@@ -661,7 +661,7 @@ class CFAutoCheck:
             '-url', self.speed_test_url,
             '-dn', str(dn),
             '-tl', str(self.max_latency),
-            '-tlp', str(self.max_loss),
+            '-tlr', str(self.max_loss),
             '-p', str(len(ips)),  # Output all results to file
             '-debug'
         ]
