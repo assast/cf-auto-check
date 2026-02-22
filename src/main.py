@@ -419,6 +419,39 @@ class CFAutoCheck:
         dup_ips = sum(1 for count in self.ip_occurrence_count.values() if count > 1)
         logger.info(f"Grouped {total_cfips} CFIPs into {unique_ips} unique IPs, {len(self.port_groups)} port groups, {len(self.unresolved_cfips)} unresolved, {dup_ips} duplicate IPs")
 
+    def _cleanup_stale_port_files(self):
+        """Remove stale ips/result files for ports no longer in current data"""
+        if not os.path.exists(self.cfst_dir):
+            return
+
+        import re
+        active_ports = set(str(p) for p in self.port_groups.keys())
+        # Patterns: ips_{port}.txt, speed_ips_{port}.txt, latency_{port}.csv, speed_{port}.csv, result_{port}.csv
+        patterns = [
+            (re.compile(r'^ips_(\d+)\.txt$'), 'txt'),
+            (re.compile(r'^speed_ips_(\d+)\.txt$'), 'txt'),
+            (re.compile(r'^latency_(\d+)\.csv$'), 'csv'),
+            (re.compile(r'^speed_(\d+)\.csv$'), 'csv'),
+            (re.compile(r'^result_(\d+)\.csv$'), 'csv'),
+        ]
+
+        count = 0
+        for filename in os.listdir(self.cfst_dir):
+            for pattern, _ in patterns:
+                m = pattern.match(filename)
+                if m and m.group(1) not in active_ports:
+                    filepath = os.path.join(self.cfst_dir, filename)
+                    try:
+                        os.remove(filepath)
+                        count += 1
+                        logger.debug(f"Cleaned up stale file: {filename}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete stale file {filename}: {str(e)}")
+                    break
+
+        if count > 0:
+            logger.info(f"Cleaned up {count} stale port file(s)")
+
     def _resolve_domain(self, domain):
         """Resolve domain using multiple methods"""
         # Method 1: Standard socket resolution
@@ -865,6 +898,9 @@ class CFAutoCheck:
 
             # Group IPs by port
             self.export_ips_by_port(cfips)
+
+            # Clean up stale files for ports no longer in current data
+            self._cleanup_stale_port_files()
 
             # === Phase 1: Latency Testing ===
             latency_results = None
