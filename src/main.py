@@ -679,26 +679,30 @@ class CFAutoCheck:
         Returns:
             Dict of {port: [results]} or None on failure
         """
+        total_ports = len(self.port_groups)
+        total_ips_all = sum(len(ips) for ips in self.port_groups.values())
         logger.info("=" * 60)
-        logger.info(f"[Phase1] LATENCY TESTING (threads: {self.latency_threads})")
+        logger.info(f"[Phase1] LATENCY TESTING - {total_ports} ports, {total_ips_all} IPs (threads: {self.latency_threads})")
         logger.info("=" * 60)
 
         latency_results = {}
 
         # Run latency tests for each port sequentially
-        for port, ips in self.port_groups.items():
-            logger.info(f"[Phase1] Running latency test for port {port} ({len(ips)} IPs)")
+        port_items = list(self.port_groups.items())
+        for idx, (port, ips) in enumerate(port_items, 1):
+            logger.info(f"[Phase1] [{idx}/{total_ports}] Running latency test for port {port} ({len(ips)} IPs)")
             try:
                 results = self.run_latency_test_for_port(port, ips)
                 if results:
                     for r in results:
                         r['port'] = port
                     latency_results[port] = results
-                    logger.info(f"[Phase1] Port {port}: {len(results)} IPs passed latency test")
+                    passed_total = sum(len(r) for r in latency_results.values())
+                    logger.info(f"[Phase1] [{idx}/{total_ports}] Port {port}: {len(results)} IPs passed (total passed: {passed_total})")
                 else:
-                    logger.warning(f"[Phase1] Port {port}: No results")
+                    logger.warning(f"[Phase1] [{idx}/{total_ports}] Port {port}: No results")
             except Exception as e:
-                logger.error(f"[Phase1] Port {port} failed: {str(e)}")
+                logger.error(f"[Phase1] [{idx}/{total_ports}] Port {port} failed: {str(e)}")
 
         if not latency_results:
             logger.error("[Phase1] No latency results from any port")
@@ -758,20 +762,24 @@ class CFAutoCheck:
             logger.info(f"[Phase2] Port {port}: selected {count} IPs for speed test (from {total_for_port} latency-tested)")
 
         # Run speed tests for each port sequentially
+        total_speed_ports = len(speed_tasks)
+        total_speed_ips = sum(len(ips) for ips, _ in speed_tasks.values())
+        logger.info(f"[Phase2] Starting speed tests: {total_speed_ports} ports, {total_speed_ips} IPs")
         all_speed_results = []
-        for port, (ips, download_count) in speed_tasks.items():
-            logger.info(f"[Phase2] Running speed test for port {port} ({len(ips)} IPs)")
+        speed_items = list(speed_tasks.items())
+        for idx, (port, (ips, download_count)) in enumerate(speed_items, 1):
+            logger.info(f"[Phase2] [{idx}/{total_speed_ports}] Running speed test for port {port} ({len(ips)} IPs)")
             try:
                 results = self.run_speed_test_for_port(port, ips, download_count)
                 if results:
                     for r in results:
                         r['port'] = port
                     all_speed_results.extend(results)
-                    logger.info(f"[Phase2] Port {port}: {len(results)} IPs speed tested")
+                    logger.info(f"[Phase2] [{idx}/{total_speed_ports}] Port {port}: {len(results)} IPs speed tested (total done: {len(all_speed_results)})")
                 else:
-                    logger.warning(f"[Phase2] Port {port}: No speed results")
+                    logger.warning(f"[Phase2] [{idx}/{total_speed_ports}] Port {port}: No speed results")
             except Exception as e:
-                logger.error(f"[Phase2] Port {port} speed test failed: {str(e)}")
+                logger.error(f"[Phase2] [{idx}/{total_speed_ports}] Port {port} speed test failed: {str(e)}")
 
         if not all_speed_results:
             logger.error("[Phase2] No speed test results")
