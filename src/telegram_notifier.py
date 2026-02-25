@@ -145,3 +145,28 @@ class TelegramNotifier:
             f"⏰ 时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         return self.send_message(message)
+
+    def send_dns_sync_result(self, record_name: str, best_ip: str, latency: float, 
+                              tested_count: int, old_ip: str = '', updated: bool = False):
+        """Send DNS sync cron result notification to Telegram"""
+        if not self.enabled:
+            return False
+        
+        if updated:
+            status = "🔄 已更新"
+            ip_line = (
+                f"🔴 旧 IP: <code>{old_ip}</code>\n"
+                f"🟢 新 IP: <code>{best_ip}</code>"
+            )
+        else:
+            status = "✅ 无变更"
+            ip_line = f"🟢 IP: <code>{best_ip}</code>"
+        
+        message = (
+            f"⏰ <b>CF DNS 定时同步</b> {status}\n\n"
+            f"📍 Record: <code>{record_name}</code>\n"
+            f"{ip_line}\n"
+            f"⏱ 延迟: {latency:.2f}ms\n"
+            f"📊 测试 IP 数: {tested_count}"
+        )
+        return self.send_message(message)

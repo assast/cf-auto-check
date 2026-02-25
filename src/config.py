@@ -55,6 +55,11 @@ class Config:
     CF_API_TOKEN = os.getenv('CF_API_TOKEN', '')  # Cloudflare API Token with DNS edit permission
     CF_ZONE_ID = os.getenv('CF_ZONE_ID', '')      # Zone ID of the domain
     CF_RECORD_NAME = os.getenv('CF_RECORD_NAME', '')  # DNS A record name to update (e.g., 'cf.example.com')
+    
+    # CF DNS Sync Cron (independent lightweight sync scheduler)
+    # When set, runs latency-only test on enabled IPs filtered by SYNC_TO_CF_FILTER_PORT
+    # and syncs the lowest latency IP to CF DNS at the specified schedule
+    SYNC_TO_CF_CRON = os.getenv('SYNC_TO_CF_CRON', '')  # Empty = disabled
 
     # Test Mode: cfip, proxyip, outbound, all
     TEST_MODE = os.getenv('TEST_MODE', 'cfip')

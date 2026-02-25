@@ -45,6 +45,7 @@ class CFAutoCheck:
         self.cf_api_token = Config.CF_API_TOKEN
         self.cf_zone_id = Config.CF_ZONE_ID
         self.cf_record_name = Config.CF_RECORD_NAME
+        self.sync_to_cf_cron = Config.SYNC_TO_CF_CRON
         
         self.running = True
         self.check_running = False  # Flag to prevent concurrent checks
@@ -73,11 +74,17 @@ class CFAutoCheck:
         logger.info(f"CFST Threads: {self.latency_threads}, Speed Test Count: {self.speed_test_count}")
         logger.info(f"Sync to CF Filter Port: {self.sync_to_cf_filter_port if self.sync_to_cf_filter_port > 0 else 'All ports'}")
         logger.info(f"Sync to CF: {'Enabled' if self.sync_to_cf else 'Disabled'}")
+        logger.info(f"Sync to CF Cron: {self.sync_to_cf_cron if self.sync_to_cf_cron else 'Disabled'}")
         
         # Start API server if enabled
         if self.enable_api_trigger:
             api_thread = threading.Thread(target=self._run_api_server, daemon=True)
             api_thread.start()
+        
+        # Start CF DNS sync cron scheduler if enabled
+        if self.sync_to_cf and self.sync_to_cf_cron:
+            dns_sync_thread = threading.Thread(target=self._run_cf_dns_sync_scheduler, daemon=True)
+            dns_sync_thread.start()
         
         # Run immediately on startup if cron is enabled
         if self.enable_cron_scheduler:
@@ -1263,6 +1270,200 @@ class CFAutoCheck:
         except Exception as e:
             logger.error(f"CF DNS sync error: {str(e)}")
             return False
+
+    def _run_cf_dns_sync_scheduler(self):
+        """Run independent cron scheduler for CF DNS sync"""
+        logger.info(f"[DNS-Sync] Starting CF DNS sync scheduler with cron: {self.sync_to_cf_cron}")
+        
+        # Run once on startup
+        try:
+            self.run_cf_dns_sync()
+        except Exception as e:
+            logger.error(f"[DNS-Sync] Error in initial DNS sync: {str(e)}")
+        
+        cron = croniter(self.sync_to_cf_cron, datetime.now())
+        
+        while self.running:
+            next_run = cron.get_next(datetime)
+            wait_seconds = (next_run - datetime.now()).total_seconds()
+            
+            if wait_seconds > 0:
+                logger.info(f"[DNS-Sync] Next DNS sync scheduled at: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_seconds:.0f}s)")
+                
+                while wait_seconds > 0 and self.running:
+                    sleep_time = min(wait_seconds, 60)
+                    time.sleep(sleep_time)
+                    wait_seconds -= sleep_time
+            
+            if self.running:
+                try:
+                    self.run_cf_dns_sync()
+                except Exception as e:
+                    logger.error(f"[DNS-Sync] Error in scheduled DNS sync: {str(e)}")
+
+    def run_cf_dns_sync(self):
+        """Run lightweight latency-only test on enabled IPs and sync best to CF DNS.
+        
+        This is independent from the main check cycle. It:
+        1. Fetches enabled CFIPs from API
+        2. Filters by SYNC_TO_CF_FILTER_PORT
+        3. Runs latency-only CFST test
+        4. Syncs lowest-latency IP to CF DNS
+        """
+        logger.info("[DNS-Sync] Starting CF DNS sync cycle...")
+        
+        # Check prerequisites
+        if not self.cf_api_token or not self.cf_zone_id or not self.cf_record_name:
+            logger.warning("[DNS-Sync] Missing CF DNS configuration (CF_API_TOKEN, CF_ZONE_ID, or CF_RECORD_NAME)")
+            return
+        
+        if not self.check_cfst_binary():
+            logger.error("[DNS-Sync] CFST binary not available")
+            return
+        
+        # Fetch enabled CFIPs from API
+        try:
+            cfips = self.api_client.get_cf_ips()
+            if not cfips:
+                logger.warning("[DNS-Sync] No CF IPs found from API")
+                return
+        except Exception as e:
+            logger.error(f"[DNS-Sync] Failed to fetch CF IPs: {str(e)}")
+            return
+        
+        # Filter: only enabled IPs
+        enabled_cfips = [ip for ip in cfips if ip.get('status') == 'enabled']
+        if not enabled_cfips:
+            logger.warning("[DNS-Sync] No enabled CF IPs found")
+            return
+        
+        # Filter by port
+        filter_port = self.sync_to_cf_filter_port
+        if filter_port > 0:
+            port_filtered = [ip for ip in enabled_cfips if ip.get('port', 443) == filter_port]
+            if not port_filtered:
+                logger.warning(f"[DNS-Sync] No enabled IPs found on port {filter_port}")
+                return
+            logger.info(f"[DNS-Sync] Filtered {len(port_filtered)} enabled IPs on port {filter_port} (from {len(enabled_cfips)} enabled)")
+            enabled_cfips = port_filtered
+        else:
+            filter_port = 443  # Default port for CFST test
+            logger.info(f"[DNS-Sync] Using all {len(enabled_cfips)} enabled IPs")
+        
+        # Resolve addresses to IPs
+        test_ips = []
+        ip_to_address = {}  # Map resolved IP back to original address
+        for cfip in enabled_cfips:
+            address = cfip.get('address')
+            try:
+                socket.inet_aton(address)
+                ip_addr = address
+            except socket.error:
+                ip_addr = self._resolve_domain(address)
+                if ip_addr is None:
+                    logger.warning(f"[DNS-Sync] Could not resolve {address}, skipping")
+                    continue
+                logger.debug(f"[DNS-Sync] Resolved {address} -> {ip_addr}")
+            
+            if ip_addr not in test_ips:
+                test_ips.append(ip_addr)
+                ip_to_address[ip_addr] = address
+        
+        if not test_ips:
+            logger.warning("[DNS-Sync] No IPs available after resolution")
+            return
+        
+        logger.info(f"[DNS-Sync] Testing {len(test_ips)} unique IPs for latency (port {filter_port})")
+        
+        # Write IPs to temp file
+        dns_sync_ips_file = os.path.join(self.cfst_dir, 'dns_sync_ips.txt')
+        dns_sync_result_file = os.path.join(self.cfst_dir, 'dns_sync_result.csv')
+        
+        with open(dns_sync_ips_file, 'w') as f:
+            for ip in test_ips:
+                f.write(f"{ip}\n")
+        
+        # Build CFST command - latency only
+        cmd = [
+            self.cfst_path,
+            '-f', dns_sync_ips_file,
+            '-o', dns_sync_result_file,
+            '-tp', str(filter_port),
+            '-n', str(self.latency_threads),
+            '-dd',  # Disable download testing
+            '-tl', str(self.max_latency),
+            '-tlr', str(self.max_loss),
+            '-p', str(len(test_ips)),
+        ]
+        
+        logger.info(f"[DNS-Sync] Command: {' '.join(cmd)}")
+        
+        if not self._run_cfst_process(cmd, f'dns-sync-{filter_port}'):
+            logger.error("[DNS-Sync] CFST latency test failed")
+            return
+        
+        # Parse results
+        results = self.parse_cfst_results(dns_sync_result_file)
+        if not results:
+            logger.error("[DNS-Sync] No results from latency test")
+            return
+        
+        # Sort by latency (ascending)
+        results.sort(key=lambda x: x['latency'])
+        
+        best = results[0]
+        best_ip = best['address']
+        best_latency = best['latency']
+        
+        logger.info(f"[DNS-Sync] Best IP: {best_ip} ({best_latency:.2f}ms) from {len(results)} results")
+        
+        # Log top 5 for reference
+        for i, r in enumerate(results[:5], 1):
+            logger.info(f"[DNS-Sync]   {i}. {r['address']} - {r['latency']:.2f}ms")
+        
+        # Get current DNS record IP for notification
+        import requests as req_lib
+        old_ip = ''
+        try:
+            headers = {
+                'Authorization': f'Bearer {self.cf_api_token}',
+                'Content-Type': 'application/json'
+            }
+            list_url = f"https://api.cloudflare.com/client/v4/zones/{self.cf_zone_id}/dns_records"
+            params = {'name': self.cf_record_name, 'type': 'A'}
+            response = req_lib.get(list_url, headers=headers, params=params, timeout=30)
+            if response.ok:
+                data = response.json()
+                records = data.get('result', [])
+                if records:
+                    old_ip = records[0].get('content', '')
+        except Exception:
+            pass
+        
+        # Sync to CF DNS
+        updated = (old_ip != best_ip)
+        success = self.sync_cf_dns(best_ip)
+        
+        if success:
+            # Send TG notification with result
+            self.telegram.send_dns_sync_result(
+                record_name=self.cf_record_name,
+                best_ip=best_ip,
+                latency=best_latency,
+                tested_count=len(results),
+                old_ip=old_ip,
+                updated=updated
+            )
+        
+        # Cleanup temp files
+        for f in [dns_sync_ips_file, dns_sync_result_file]:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception:
+                pass
+        
+        logger.info("[DNS-Sync] DNS sync cycle completed")
 
     def check_proxy_ips(self):
         pass
