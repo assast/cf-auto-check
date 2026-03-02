@@ -1181,7 +1181,7 @@ class CFAutoCheck:
         # Send Telegram notification
         self.telegram.send_cfip_results(top_results, top_count=self.speed_enable_count)
 
-    def sync_cf_dns(self, ip_address):
+    def sync_cf_dns(self, ip_address, silent=False):
         """Sync best IP to Cloudflare DNS A record"""
         if not self.cf_api_token or not self.cf_zone_id or not self.cf_record_name:
             logger.warning("CF DNS sync enabled but missing configuration (CF_API_TOKEN, CF_ZONE_ID, or CF_RECORD_NAME)")
@@ -1216,7 +1216,8 @@ class CFAutoCheck:
                 
                 if current_ip == ip_address:
                     logger.info(f"CF DNS A record {self.cf_record_name} already points to {ip_address}, skipping update")
-                    self.telegram.send_dns_update(self.cf_record_name, ip_address, ip_address)
+                    if not silent:
+                        self.telegram.send_dns_update(self.cf_record_name, ip_address, ip_address)
                     return True
                 
                 update_url = f"https://api.cloudflare.com/client/v4/zones/{self.cf_zone_id}/dns_records/{record_id}"
@@ -1235,7 +1236,8 @@ class CFAutoCheck:
                 if result.get('success'):
                     logger.info(f"CF DNS A record {self.cf_record_name} updated: {current_ip} -> {ip_address}")
                     # Send TG notification
-                    self.telegram.send_dns_update(self.cf_record_name, current_ip, ip_address)
+                    if not silent:
+                        self.telegram.send_dns_update(self.cf_record_name, current_ip, ip_address)
                     return True
                 else:
                     logger.error(f"CF DNS update failed: {result.get('errors', 'Unknown error')}")
@@ -1258,7 +1260,8 @@ class CFAutoCheck:
                 if result.get('success'):
                     logger.info(f"CF DNS A record {self.cf_record_name} created with IP {ip_address}")
                     # Send TG notification
-                    self.telegram.send_dns_update(self.cf_record_name, '', ip_address)
+                    if not silent:
+                        self.telegram.send_dns_update(self.cf_record_name, '', ip_address)
                     return True
                 else:
                     logger.error(f"CF DNS create failed: {result.get('errors', 'Unknown error')}")
@@ -1442,7 +1445,7 @@ class CFAutoCheck:
         
         # Sync to CF DNS
         updated = (old_ip != best_ip)
-        success = self.sync_cf_dns(best_ip)
+        success = self.sync_cf_dns(best_ip, silent=True)
         
         if success:
             # Send TG notification with result
