@@ -51,9 +51,36 @@ class TelegramBotController:
             logger.info("Telegram bot command listener disabled")
             return
 
+        self._register_commands()
+
         thread = threading.Thread(target=self._poll_loop, daemon=True)
         thread.start()
         logger.info("Telegram bot command listener started")
+
+    def _register_commands(self):
+        commands = [
+            {'command': 'start', 'description': '显示完整帮助'},
+            {'command': 'cfst', 'description': '触发 CFST 检测（详见 /start）'},
+            {'command': 'cfst_status', 'description': '查看 CFST 检测状态'},
+            {'command': 'cfst_health', 'description': '查看 CFST 健康检查'},
+            {'command': 'cf_sync', 'description': '手动同步指定 IP 到 Cloudflare'}
+        ]
+
+        payload = {'commands': commands}
+        if self.allowed_chat_id:
+            payload['scope'] = {
+                'type': 'chat',
+                'chat_id': int(self.allowed_chat_id)
+            }
+
+        try:
+            resp = self._api_post('setMyCommands', payload)
+            if resp.ok:
+                logger.info('Telegram bot commands registered successfully')
+            else:
+                logger.error(f"Telegram setMyCommands failed: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            logger.error(f"Telegram setMyCommands exception: {e}")
 
     def _poll_loop(self):
         while self.service.running:
