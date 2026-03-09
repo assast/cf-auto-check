@@ -62,7 +62,6 @@ class TelegramBotController:
             {'command': 'start', 'description': '显示完整帮助'},
             {'command': 'cfst', 'description': '触发 CFST 检测（详见 /start）'},
             {'command': 'cfst_status', 'description': '查看 CFST 检测状态'},
-            {'command': 'cfst_health', 'description': '查看 CFST 健康检查'},
             {'command': 'cf_sync', 'description': '手动同步指定 IP 到 Cloudflare'}
         ]
 
@@ -147,8 +146,6 @@ class TelegramBotController:
             return self._handle_cfst(lower)
         if lower == '/cfst_status':
             return self.service.format_status_html()
-        if lower == '/cfst_health':
-            return self.service.format_health_html()
         if lower.startswith('/cf_sync '):
             ip = cmd.split(None, 1)[1].strip()
             return self.service.handle_manual_cf_sync(ip)
@@ -194,6 +191,5 @@ class TelegramBotController:
             "<code>/cfst latency force</code> - 强制重跑延迟\n"
             "<code>/cfst speed force</code> - 强制重跑速度\n"
             "<code>/cfst_status</code> - 查看检测状态\n"
-            "<code>/cfst_health</code> - 健康检查\n"
             "<code>/cf_sync &lt;IP&gt;</code> - 手动同步指定 IP 到 Cloudflare A 记录\n"
         )
