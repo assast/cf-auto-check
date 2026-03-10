@@ -142,8 +142,6 @@ class TelegramBotController:
     def _dispatch_command(self, cmd):
         lower = cmd.lower().strip()
 
-        if lower.startswith('/cfst'):
-            return self._handle_cfst(lower)
         if lower == '/cfst_status':
             return self.service.format_status_html()
         if lower.startswith('/cf_sync '):
@@ -156,6 +154,8 @@ class TelegramBotController:
             )
         if lower in ['/help', '/start']:
             return self._help_text()
+        if lower == '/cfst' or lower.startswith('/cfst '):
+            return self._handle_cfst(lower)
 
         return (
             "❓ <b>未知命令</b>\n\n"
