@@ -1579,6 +1579,63 @@ class CFAutoCheck:
             lines.append(f"{html.escape(str(k))}: <code>{html.escape(str(v))}</code>")
         return "\n".join(lines)
 
+    def handle_import_cf_ip(self, ip: str, port: int):
+        """Import an IP:port from a Telegram report into the CFIP list via API."""
+        try:
+            socket.inet_aton(ip)
+        except OSError:
+            return f"❌ <b>入库失败</b>：IP 格式无效：<code>{html.escape(ip)}</code>"
+
+        if port <= 0 or port > 65535:
+            return f"❌ <b>入库失败</b>：端口无效：<code>{html.escape(str(port))}</code>"
+
+        cfips = self.api_client.get_cf_ips() or []
+        existing = None
+        for item in cfips:
+            if str(item.get('address') or '').strip() == ip and int(item.get('port') or 443) == int(port):
+                existing = item
+                break
+
+        # If already exists, just acknowledge (optionally update name)
+        if existing and existing.get('id'):
+            ip_id = existing['id']
+            try:
+                # Keep current status; lightly refresh name for visibility
+                new_name = f"imported|{ip}:{port}"
+                self.api_client.update_cf_ip(ip_id, {'name': new_name})
+            except Exception:
+                pass
+            return (
+                "✅ <b>已存在，跳过入库</b>\n\n"
+                f"IP: <code>{html.escape(ip)}</code>\n"
+                f"Port: <code>{html.escape(str(port))}</code>\n"
+                f"ID: <code>{html.escape(str(ip_id))}</code>"
+            )
+
+        # Try create
+        payload = {
+            'address': ip,
+            'port': int(port),
+            'status': 'disabled',
+            'name': f"imported|{ip}:{port}",
+        }
+
+        created = self.api_client.create_cf_ip(payload)
+        if created and (created.get('success') or created.get('data') or created.get('id')):
+            created_id = (created.get('data') or {}).get('id') or created.get('id') or ''
+            return (
+                "✅ <b>入库成功</b>\n\n"
+                f"IP: <code>{html.escape(ip)}</code>\n"
+                f"Port: <code>{html.escape(str(port))}</code>\n"
+                f"ID: <code>{html.escape(str(created_id))}</code>"
+            )
+
+        return (
+            "❌ <b>入库失败</b>\n\n"
+            "原因：后端 API 可能不支持 <code>POST /api/cfip</code> 创建。\n"
+            "建议：我可以改成在后端加创建接口，或提供一个已有记录的更新匹配逻辑。"
+        )
+
     def handle_manual_cf_sync(self, ip_address):
         try:
             socket.inet_aton(ip_address)
