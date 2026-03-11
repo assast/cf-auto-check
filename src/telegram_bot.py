@@ -5,6 +5,9 @@ from .config import Config
 from .logger import logger
 
 
+import re
+
+
 class TelegramBotController:
     """Simple Telegram long-polling command controller."""
 
@@ -126,12 +129,16 @@ class TelegramBotController:
         text = (message.get('text') or '').strip()
         message_id = message.get('message_id')
 
-        if not text.startswith('/'):
+        if self.allowed_chat_id and chat_id != self.allowed_chat_id:
+            logger.warning(f"Ignoring Telegram message from unauthorized chat_id={chat_id}")
+            self.send_message(chat_id, "❌ Unauthorized chat", reply_to_message_id=message_id)
             return
 
-        if self.allowed_chat_id and chat_id != self.allowed_chat_id:
-            logger.warning(f"Ignoring Telegram command from unauthorized chat_id={chat_id}")
-            self.send_message(chat_id, "❌ Unauthorized chat", reply_to_message_id=message_id)
+        # Non-command messages: try to parse CF preferred IP report and import
+        if not text.startswith('/'):
+            handled, resp = self._maybe_import_cf_preferred_ip(text)
+            if handled and resp:
+                self.send_message(chat_id, resp, reply_to_message_id=message_id)
             return
 
         cmd = self._normalize_command(text)
@@ -180,6 +187,40 @@ class TelegramBotController:
 
         return self.service.trigger_manual_check(phase=phase, force_refresh=force, source='telegram')
 
+    def _maybe_import_cf_preferred_ip(self, text: str):
+        """Parse messages like:
+
+        #CF优选IP
+        ...
+        🖥 IP地址: 154.17.28.114
+        🔌 端口: 39553
+
+        Returns (handled: bool, response: str)
+        """
+        if '#CF优选IP' not in text:
+            return False, ''
+
+        ip_match = re.search(r"IP地址\s*[:：]\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", text)
+        port_match = re.search(r"端口\s*[:：]\s*(\d{1,5})", text)
+        if not ip_match or not port_match:
+            return True, (
+                "❌ <b>入库失败</b>：未能从消息中解析出 IP/端口。\n\n"
+                "需要包含类似：<code>IP地址: 1.2.3.4</code> 与 <code>端口: 443</code>"
+            )
+
+        ip = ip_match.group(1).strip()
+        port = int(port_match.group(1).strip())
+        if port <= 0 or port > 65535:
+            return True, f"❌ <b>入库失败</b>：端口无效：<code>{port}</code>"
+
+        try:
+            return True, self.service.handle_import_cf_ip(ip=ip, port=port)
+        except Exception as e:
+            logger.error(f"Import CF preferred IP failed: {e}")
+            return True, "❌ <b>入库失败</b>：服务端异常。请稍后重试或查看日志。"
+
+        return self.service.trigger_manual_check(phase=phase, force_refresh=force, source='telegram')
+
     def _help_text(self):
         return (
             "🤖 <b>CF Auto Check Bot 命令</b>\n\n"
@@ -191,5 +232,6 @@ class TelegramBotController:
             "<code>/cfst latency force</code> - 强制重跑延迟\n"
             "<code>/cfst speed force</code> - 强制重跑速度\n"
             "<code>/cfst_status</code> - 查看检测状态\n"
-            "<code>/cf_sync &lt;IP&gt;</code> - 手动同步指定 IP 到 Cloudflare A 记录\n"
+            "<code>/cf_sync &lt;IP&gt;</code> - 手动同步指定 IP 到 Cloudflare A 记录\n\n"
+            "📥 <b>自动入库</b>：直接把频道里那段 <code>#CF优选IP</code> 文本转发给机器人，它会解析 IP/端口并尝试入库。\n"
         )
