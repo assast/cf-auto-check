@@ -75,3 +75,11 @@ class Config:
 
     # Telegram bot command listener
     TG_BOT_COMMANDS_ENABLED = os.getenv('TG_BOT_COMMANDS_ENABLED', 'true').lower() == 'true'
+
+    # CFIP import API (optional): for importing #CF优选IP messages
+    CFIP_IMPORT_API_URL = os.getenv('CFIP_IMPORT_API_URL', '')
+    CFIP_IMPORT_API_KEY = os.getenv('CFIP_IMPORT_API_KEY', '')
+
+    # Optional: also push import result to a Telegram channel/group
+    # Example: -1003460092123
+    TG_IMPORT_NOTIFY_CHANNEL_ID = os.getenv('TG_IMPORT_NOTIFY_CHANNEL_ID', '')

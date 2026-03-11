@@ -136,9 +136,15 @@ class TelegramBotController:
 
         # Non-command messages: try to parse CF preferred IP report and import
         if not text.startswith('/'):
-            handled, resp = self._maybe_import_cf_preferred_ip(text)
+            handled, resp, broadcast = self._maybe_import_cf_preferred_ip(text, message)
             if handled and resp:
                 self.send_message(chat_id, resp, reply_to_message_id=message_id)
+            # Optional broadcast to a channel
+            if handled and broadcast and Config.TG_IMPORT_NOTIFY_CHANNEL_ID:
+                try:
+                    self.send_message(str(Config.TG_IMPORT_NOTIFY_CHANNEL_ID).strip(), broadcast)
+                except Exception as e:
+                    logger.error(f"Broadcast import result failed: {e}")
             return
 
         cmd = self._normalize_command(text)
@@ -187,7 +193,7 @@ class TelegramBotController:
 
         return self.service.trigger_manual_check(phase=phase, force_refresh=force, source='telegram')
 
-    def _maybe_import_cf_preferred_ip(self, text: str):
+    def _maybe_import_cf_preferred_ip(self, text: str, message: dict):
         """Parse messages like:
 
         #CF优选IP
@@ -195,29 +201,57 @@ class TelegramBotController:
         🖥 IP地址: 154.17.28.114
         🔌 端口: 39553
 
-        Returns (handled: bool, response: str)
+        Returns (handled: bool, response: str, broadcast: str)
         """
         if '#CF优选IP' not in text:
-            return False, ''
+            return False, '', ''
 
         ip_match = re.search(r"IP地址\s*[:：]\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", text)
         port_match = re.search(r"端口\s*[:：]\s*(\d{1,5})", text)
         if not ip_match or not port_match:
-            return True, (
+            msg = (
                 "❌ <b>入库失败</b>：未能从消息中解析出 IP/端口。\n\n"
                 "需要包含类似：<code>IP地址: 1.2.3.4</code> 与 <code>端口: 443</code>"
             )
+            return True, msg, "✗ 导入失败：未能解析 IP/端口"
 
         ip = ip_match.group(1).strip()
         port = int(port_match.group(1).strip())
         if port <= 0 or port > 65535:
-            return True, f"❌ <b>入库失败</b>：端口无效：<code>{port}</code>"
+            msg = f"❌ <b>入库失败</b>：端口无效：<code>{port}</code>"
+            return True, msg, f"✗ 导入失败：端口无效 {port}"
+
+        # Build remark similar to your reference snippet
+        parts = []
+        speed_match = re.search(r"下载速度\s*[:：]\s*(\d+)\s*kB/s", text)
+        if speed_match:
+            speed_kb = int(speed_match.group(1))
+            parts.append(f"{round(speed_kb / 1024, 2)}MB/s")
+
+        location_match = re.search(r"IP原生位置:.*?🗺\s*([^\n]+)", text, re.DOTALL)
+        if location_match:
+            location = location_match.group(1).strip()
+            location = location.replace('·', '-').replace('  ', ' ')
+            parts.append(location)
+
+        isp_match = re.search(r"运营商\s*[:：]\s*([^\n🌍]+)", text)
+        if isp_match:
+            parts.append(isp_match.group(1).strip())
+
+        remark = ' | '.join([p for p in parts if p]) or ip
+
+        # Source info
+        from_user = (message.get('from') or {}).get('id')
+        from_user_id = str(from_user) if from_user is not None else '未知'
+        src_chat_id = str((message.get('chat') or {}).get('id') or '')
+        src_message_id = str(message.get('message_id') or '')
 
         try:
-            return True, self.service.handle_import_cf_ip(ip=ip, port=port)
+            resp, broadcast = self.service.handle_import_cf_ip(ip=ip, port=port, remark=remark, from_user_id=from_user_id, src_chat_id=src_chat_id, src_message_id=src_message_id)
+            return True, resp, broadcast
         except Exception as e:
             logger.error(f"Import CF preferred IP failed: {e}")
-            return True, "❌ <b>入库失败</b>：服务端异常。请稍后重试或查看日志。"
+            return True, "❌ <b>入库失败</b>：服务端异常。请稍后重试或查看日志。", "✗ 导入失败：服务端异常"
 
         return self.service.trigger_manual_check(phase=phase, force_refresh=force, source='telegram')
 

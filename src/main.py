@@ -1579,16 +1579,115 @@ class CFAutoCheck:
             lines.append(f"{html.escape(str(k))}: <code>{html.escape(str(v))}</code>")
         return "\n".join(lines)
 
-    def handle_import_cf_ip(self, ip: str, port: int):
-        """Import an IP:port from a Telegram report into the CFIP list via API."""
+    def handle_import_cf_ip(self, ip: str, port: int, remark: str = '', from_user_id: str = '未知', src_chat_id: str = '', src_message_id: str = ''):
+        """Import an IP:port from a Telegram report.
+
+        Preferred path: call a dedicated import API (CFIP_IMPORT_API_URL) with key.
+        Fallback: try to create/update via the existing /api/cfip endpoints.
+
+        Returns: (user_reply_html, broadcast_text)
+        """
         try:
             socket.inet_aton(ip)
         except OSError:
-            return f"❌ <b>入库失败</b>：IP 格式无效：<code>{html.escape(ip)}</code>"
+            msg = f"❌ <b>入库失败</b>：IP 格式无效：<code>{html.escape(ip)}</code>"
+            return msg, f"✗ 导入失败: {ip}:{port} (IP无效)"
 
         if port <= 0 or port > 65535:
-            return f"❌ <b>入库失败</b>：端口无效：<code>{html.escape(str(port))}</code>"
+            msg = f"❌ <b>入库失败</b>：端口无效：<code>{html.escape(str(port))}</code>"
+            return msg, f"✗ 导入失败: {ip}:{port} (端口无效)"
 
+        remark = remark or ip
+
+        # --- Preferred: dedicated import API ---
+        import_url = (Config.CFIP_IMPORT_API_URL or '').strip()
+        import_key = (Config.CFIP_IMPORT_API_KEY or '').strip()
+        if import_url and import_key:
+            try:
+                import requests
+                resp = requests.post(
+                    import_url,
+                    json={
+                        'address': ip,
+                        'port': int(port),
+                        'remark': remark,
+                        'apiKey': import_key,
+                    },
+                    headers={
+                        'Content-Type': 'application/json',
+                        'X-API-Key': import_key,
+                    },
+                    timeout=10,
+                )
+
+                # Try parse json; if not json, fallback to text
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = None
+
+                # Success
+                if resp.status_code == 200 and isinstance(data, dict) and data.get('success'):
+                    new_id = ((data.get('data') or {}) if isinstance(data.get('data'), dict) else {}).get('id')
+                    content = (
+                        "✅ <b>导入成功</b>\n\n"
+                        f"IP: <code>{html.escape(ip)}</code>\n"
+                        f"Port: <code>{html.escape(str(port))}</code>\n"
+                        + (f"ID: <code>{html.escape(str(new_id))}</code>\n" if new_id else "")
+                        + f"备注: <code>{html.escape(remark)}</code>"
+                    )
+                    broadcast = (
+                        f"✓ 导入成功: {ip}:{port}\n"
+                        + (f"ID: {new_id}\n" if new_id else "")
+                        + f"备注: {remark}\n"
+                        + f"来源用户: {from_user_id}\n"
+                        + f"原始消息: {src_chat_id}/{src_message_id}"
+                    )
+                    return content, broadcast
+
+                # Already exists
+                if resp.status_code == 409:
+                    existing_id = None
+                    if isinstance(data, dict):
+                        existing_id = data.get('existingId') or ((data.get('data') or {}) if isinstance(data.get('data'), dict) else {}).get('id')
+                    content = (
+                        "⚠️ <b>已存在</b>\n\n"
+                        f"IP: <code>{html.escape(ip)}</code>\n"
+                        f"Port: <code>{html.escape(str(port))}</code>\n"
+                        + (f"ID: <code>{html.escape(str(existing_id))}</code>\n" if existing_id else "")
+                        + f"备注: <code>{html.escape(remark)}</code>"
+                    )
+                    broadcast = (
+                        f"⚠️ 已存在: {ip}:{port}\n"
+                        + (f"ID: {existing_id}\n" if existing_id else "")
+                        + f"备注: {remark}\n"
+                        + f"来源用户: {from_user_id}\n"
+                        + f"原始消息: {src_chat_id}/{src_message_id}"
+                    )
+                    return content, broadcast
+
+                # Other failures
+                err = ''
+                if isinstance(data, dict):
+                    err = str(data.get('error') or data.get('message') or '')
+                err = err or getattr(resp, 'text', '')
+                msg = (
+                    "❌ <b>导入失败</b>\n\n"
+                    f"IP: <code>{html.escape(ip)}</code>\n"
+                    f"Port: <code>{html.escape(str(port))}</code>\n"
+                    f"错误: <code>{html.escape(err[:500])}</code>"
+                )
+                return msg, f"✗ 导入失败: {ip}:{port} ({err[:120]})"
+
+            except requests.exceptions.Timeout:
+                msg = f"❌ <b>导入失败</b>：API 请求超时（10s）: <code>{html.escape(ip)}:{html.escape(str(port))}</code>"
+                return msg, f"✗ API超时: {ip}:{port}"
+            except Exception as e:
+                logger.error(f"CFIP import API call failed: {e}")
+                msg = "❌ <b>导入失败</b>：API 请求异常。请查看日志。"
+                return msg, f"✗ API异常: {ip}:{port}"
+
+        # --- Fallback: existing API CRUD ---
         cfips = self.api_client.get_cf_ips() or []
         existing = None
         for item in cfips:
@@ -1596,45 +1695,46 @@ class CFAutoCheck:
                 existing = item
                 break
 
-        # If already exists, just acknowledge (optionally update name)
         if existing and existing.get('id'):
             ip_id = existing['id']
             try:
-                # Keep current status; lightly refresh name for visibility
-                new_name = f"imported|{ip}:{port}"
-                self.api_client.update_cf_ip(ip_id, {'name': new_name})
+                self.api_client.update_cf_ip(ip_id, {'name': remark})
             except Exception:
                 pass
-            return (
-                "✅ <b>已存在，跳过入库</b>\n\n"
+            content = (
+                "✅ <b>已存在，已更新备注</b>\n\n"
                 f"IP: <code>{html.escape(ip)}</code>\n"
                 f"Port: <code>{html.escape(str(port))}</code>\n"
-                f"ID: <code>{html.escape(str(ip_id))}</code>"
+                f"ID: <code>{html.escape(str(ip_id))}</code>\n"
+                f"备注: <code>{html.escape(remark)}</code>"
             )
+            broadcast = f"✓ 已存在并更新备注: {ip}:{port} (ID:{ip_id})"
+            return content, broadcast
 
-        # Try create
         payload = {
             'address': ip,
             'port': int(port),
             'status': 'disabled',
-            'name': f"imported|{ip}:{port}",
+            'name': remark,
         }
 
         created = self.api_client.create_cf_ip(payload)
         if created and (created.get('success') or created.get('data') or created.get('id')):
             created_id = (created.get('data') or {}).get('id') or created.get('id') or ''
-            return (
+            content = (
                 "✅ <b>入库成功</b>\n\n"
                 f"IP: <code>{html.escape(ip)}</code>\n"
                 f"Port: <code>{html.escape(str(port))}</code>\n"
-                f"ID: <code>{html.escape(str(created_id))}</code>"
+                + (f"ID: <code>{html.escape(str(created_id))}</code>\n" if created_id else "")
+                + f"备注: <code>{html.escape(remark)}</code>"
             )
+            return content, f"✓ 入库成功: {ip}:{port} (ID:{created_id})"
 
-        return (
+        content = (
             "❌ <b>入库失败</b>\n\n"
-            "原因：后端 API 可能不支持 <code>POST /api/cfip</code> 创建。\n"
-            "建议：我可以改成在后端加创建接口，或提供一个已有记录的更新匹配逻辑。"
+            "原因：未配置 <code>CFIP_IMPORT_API_URL/KEY</code>，且后端可能不支持 <code>POST /api/cfip</code> 创建。"
         )
+        return content, f"✗ 入库失败: {ip}:{port}"
 
     def handle_manual_cf_sync(self, ip_address):
         try:
