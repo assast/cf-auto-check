@@ -9,6 +9,7 @@ import urllib3
 import socket
 import threading
 import json
+import html
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
@@ -18,6 +19,7 @@ from .config import Config
 from .logger import logger
 from .api_client import ApiClient
 from .telegram_notifier import TelegramNotifier
+from .telegram_bot import TelegramBotController
 
 # Suppress InsecureRequestWarning
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -48,6 +50,17 @@ class CFAutoCheck:
         self.cf_zone_id = Config.CF_ZONE_ID
         self.cf_record_name = Config.CF_RECORD_NAME
         self.sync_to_cf_cron = Config.SYNC_TO_CF_CRON
+        self.telegram_bot = TelegramBotController(self, self.telegram)
+        self.last_check_meta = {
+            'status': 'idle',
+            'phase': None,
+            'force_refresh': False,
+            'source': None,
+            'started_at': None,
+            'finished_at': None,
+            'message': 'Idle',
+            'last_error': None
+        }
         
         self.running = True
         self.check_running = False  # Flag to prevent concurrent checks
@@ -104,6 +117,8 @@ class CFAutoCheck:
         logger.info(f"Sync to CF: {'Enabled' if self.sync_to_cf else 'Disabled'}")
         logger.info(f"Sync to CF Cron: {self.sync_to_cf_cron if self.sync_to_cf_cron else 'Disabled'}")
         
+        self.telegram_bot.start()
+
         # Start API server if enabled
         if self.enable_api_trigger:
             api_thread = threading.Thread(target=self._run_api_server, daemon=True)
@@ -111,8 +126,7 @@ class CFAutoCheck:
         
         # Start CF DNS sync cron scheduler if enabled
         if self.sync_to_cf and self.sync_to_cf_cron:
-            dns_sync_thread = threading.Thread(target=self._run_cf_dns_sync_scheduler, daemon=True)
-            dns_sync_thread.start()
+            logger.warning("SYNC_TO_CF_CRON is configured but automatic Cloudflare sync is disabled by command-mode policy; ignoring scheduler")
         
         # Run immediately on startup if cron is enabled
         if self.enable_cron_scheduler:
@@ -201,16 +215,7 @@ class CFAutoCheck:
                     
                     # Send TG notification for manual trigger
                     service.telegram.send_trigger_notification(phase=phase, force=force_refresh)
-                    
-                    # Trigger check in background thread
-                    def run_async_check():
-                        try:
-                            service.run_check(force_refresh=force_refresh, phase=phase)
-                        except Exception as e:
-                            logger.error(f"Error in triggered check: {str(e)}")
-                    
-                    thread = threading.Thread(target=run_async_check, daemon=True)
-                    thread.start()
+                    response = service.trigger_manual_check(phase=phase, force_refresh=force_refresh, source='api')
                     
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
@@ -218,7 +223,7 @@ class CFAutoCheck:
                     msg = f'Check triggered (phase={phase})'
                     if force_refresh:
                         msg += ' (force refresh)'
-                    self.wfile.write(json.dumps({'message': msg, 'phase': phase, 'force': force_refresh}).encode())
+                    self.wfile.write(json.dumps({'message': msg, 'phase': phase, 'force': force_refresh, 'detail': response}).encode())
                 
                 elif parsed.path == '/status':
                     self.send_response(200)
@@ -279,7 +284,7 @@ class CFAutoCheck:
         if count > 0:
             logger.info(f"Cleared {count} cached {phase} result file(s)")
 
-    def run_check(self, force_refresh=False, phase='all'):
+    def run_check(self, force_refresh=False, phase='all', source='system'):
         """Run check cycle
         
         Args:
@@ -294,6 +299,16 @@ class CFAutoCheck:
             return
         
         self.check_running = True
+        self.last_check_meta.update({
+            'status': 'running',
+            'phase': phase,
+            'force_refresh': force_refresh,
+            'source': source,
+            'started_at': self.last_check_meta.get('started_at') or datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'finished_at': None,
+            'message': f'Running check: phase={phase}, force={force_refresh}',
+            'last_error': None
+        })
         try:
             if force_refresh:
                 logger.info(f"Force refresh requested for phase={phase}, clearing caches...")
@@ -311,6 +326,19 @@ class CFAutoCheck:
                 self.check_outbounds()
                 
             logger.info("Check cycle completed")
+            self.last_check_meta.update({
+                'status': 'success',
+                'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'message': f'Check completed successfully: phase={phase}'
+            })
+        except Exception as e:
+            self.last_check_meta.update({
+                'status': 'error',
+                'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'message': f'Check failed: {e}',
+                'last_error': str(e)
+            })
+            raise
         finally:
             self.check_running = False
 
@@ -1225,13 +1253,12 @@ class CFAutoCheck:
                 port_filtered = [r for r in cfst_results if r.get('port') == self.sync_to_cf_filter_port]
                 if port_filtered:
                     best_ip = port_filtered[0]['address']
-                    logger.info(f"DNS sync: Selected best IP {best_ip} from port {self.sync_to_cf_filter_port} ({len(port_filtered)} candidates)")
-                    self.sync_cf_dns(best_ip)
+                    logger.info(f"DNS sync is configured but automatic sync is disabled; best candidate on port {self.sync_to_cf_filter_port}: {best_ip}")
                 else:
-                    logger.warning(f"DNS sync: No IPs found on port {self.sync_to_cf_filter_port}, skipping")
+                    logger.warning(f"DNS sync candidate search: No IPs found on port {self.sync_to_cf_filter_port}")
             else:
                 best_ip = cfst_results[0]['address']
-                self.sync_cf_dns(best_ip)
+                logger.info(f"DNS sync is configured but automatic sync is disabled; best candidate: {best_ip}")
 
         # Send Telegram notification
         self.telegram.send_cfip_results(top_results, top_count=len(top_results))
@@ -1522,6 +1549,269 @@ class CFAutoCheck:
                 pass
         
         logger.info("[DNS-Sync] DNS sync cycle completed")
+
+    def trigger_manual_check(self, phase='all', force_refresh=False, source='manual'):
+        """Trigger a manual check in background."""
+        if self.check_running:
+            running_phase = self.last_check_meta.get('phase') or 'unknown'
+            return (
+                "⏳ <b>CFST 正在运行</b>\n\n"
+                f"当前阶段: <code>{html.escape(str(running_phase))}</code>\n"
+                f"来源: <code>{html.escape(str(self.last_check_meta.get('source') or 'unknown'))}</code>"
+            )
+
+        self.last_check_meta.update({
+            'status': 'starting',
+            'phase': phase,
+            'force_refresh': force_refresh,
+            'source': source,
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'finished_at': None,
+            'message': f'Manual check queued: phase={phase}, force={force_refresh}',
+            'last_error': None
+        })
+
+        def run_async_check():
+            try:
+                self.run_check(force_refresh=force_refresh, phase=phase, source=source)
+            except Exception as e:
+                logger.error(f"Error in manual async check: {str(e)}")
+                self.last_check_meta.update({
+                    'status': 'error',
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'message': f'Check failed: {e}',
+                    'last_error': str(e)
+                })
+
+        thread = threading.Thread(target=run_async_check, daemon=True)
+        thread.start()
+
+        labels = {
+            'all': '全量检测',
+            'latency': '仅延迟测试',
+            'speed': '仅速度测试',
+            'reprocess': '缓存重处理'
+        }
+        suffix = '（强制刷新）' if force_refresh else ''
+        return f"🚀 <b>已启动{labels.get(phase, phase)}</b>{suffix}\n\n请稍后用 <code>/cfst_status</code> 查看状态。"
+
+    def format_status_html(self):
+        meta = self.last_check_meta
+        lines = [
+            "📊 <b>CFST 检测状态</b>",
+            "",
+            f"状态: <code>{html.escape(str(meta.get('status') or 'idle'))}</code>",
+            f"阶段: <code>{html.escape(str(meta.get('phase') or '-'))}</code>",
+            f"来源: <code>{html.escape(str(meta.get('source') or '-'))}</code>",
+            f"强制刷新: <code>{'yes' if meta.get('force_refresh') else 'no'}</code>",
+            f"运行中: <code>{'yes' if self.check_running else 'no'}</code>",
+            f"开始时间: <code>{html.escape(str(meta.get('started_at') or '-'))}</code>",
+            f"结束时间: <code>{html.escape(str(meta.get('finished_at') or '-'))}</code>",
+            f"信息: <code>{html.escape(str(meta.get('message') or '-'))}</code>"
+        ]
+        if meta.get('last_error'):
+            lines.append(f"错误: <code>{html.escape(str(meta.get('last_error')))}</code>")
+        return "\n".join(lines)
+
+    def format_health_html(self):
+        checks = []
+        checks.append(("CFST binary", 'ok' if os.path.exists(self.cfst_path) else 'missing'))
+        checks.append(("Cron scheduler", 'enabled' if self.enable_cron_scheduler else 'disabled'))
+        checks.append(("API trigger", 'enabled' if self.enable_api_trigger else 'disabled'))
+        checks.append(("Telegram bot", 'enabled' if self.telegram_bot.enabled else 'disabled'))
+        checks.append(("Telegram target chat", self.telegram.chat_id or 'unset'))
+        checks.append(("Telegram proxy", Config.TG_PROXY or 'not set'))
+        checks.append(("Auto update CFIP", 'enabled' if self.enable_auto_update else 'disabled'))
+        checks.append(("Auto sync to Cloudflare", 'enabled' if self.sync_to_cf else 'disabled'))
+        checks.append(("Sync cron", self.sync_to_cf_cron or 'disabled'))
+        checks.append(("CF API token", 'set' if self.cf_api_token else 'missing'))
+        checks.append(("CF zone", self.cf_zone_id or 'missing'))
+        checks.append(("CF record", self.cf_record_name or 'missing'))
+        checks.append(("Cache dir", self.cfst_dir))
+
+        lines = ["🩺 <b>CFST 健康检查</b>", ""]
+        for k, v in checks:
+            lines.append(f"{html.escape(str(k))}: <code>{html.escape(str(v))}</code>")
+        return "\n".join(lines)
+
+    def handle_import_cf_ip(self, ip: str, port: int, remark: str = '', from_user_id: str = '未知', src_chat_id: str = '', src_message_id: str = ''):
+        """Import an IP:port from a Telegram report.
+
+        Preferred path: call a dedicated import API (CFIP_IMPORT_API_URL) with key.
+        Fallback: try to create/update via the existing /api/cfip endpoints.
+
+        Returns: (user_reply_html, broadcast_text)
+        """
+        try:
+            socket.inet_aton(ip)
+        except OSError:
+            msg = f"❌ <b>入库失败</b>：IP 格式无效：<code>{html.escape(ip)}</code>"
+            return msg, f"✗ 导入失败: {ip}:{port} (IP无效)"
+
+        if port <= 0 or port > 65535:
+            msg = f"❌ <b>入库失败</b>：端口无效：<code>{html.escape(str(port))}</code>"
+            return msg, f"✗ 导入失败: {ip}:{port} (端口无效)"
+
+        remark = remark or ip
+
+        # --- Preferred: dedicated import API ---
+        import_url = (Config.CFIP_IMPORT_API_URL or '').strip()
+        import_key = (Config.CFIP_IMPORT_API_KEY or '').strip()
+        if import_url and import_key:
+            try:
+                import requests
+                resp = requests.post(
+                    import_url,
+                    json={
+                        'address': ip,
+                        'port': int(port),
+                        'remark': remark,
+                        'apiKey': import_key,
+                    },
+                    headers={
+                        'Content-Type': 'application/json',
+                        'X-API-Key': import_key,
+                    },
+                    timeout=10,
+                )
+
+                # Try parse json; if not json, fallback to text
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = None
+
+                # Success
+                if resp.status_code == 200 and isinstance(data, dict) and data.get('success'):
+                    new_id = ((data.get('data') or {}) if isinstance(data.get('data'), dict) else {}).get('id')
+                    content = (
+                        "✅ <b>导入成功</b>\n\n"
+                        f"IP: <code>{html.escape(ip)}</code>\n"
+                        f"Port: <code>{html.escape(str(port))}</code>\n"
+                        + (f"ID: <code>{html.escape(str(new_id))}</code>\n" if new_id else "")
+                        + f"备注: <code>{html.escape(remark)}</code>"
+                    )
+                    broadcast = (
+                        f"✓ 导入成功: {ip}:{port}\n"
+                        + (f"ID: {new_id}\n" if new_id else "")
+                        + f"备注: {remark}\n"
+                        + f"来源用户: {from_user_id}\n"
+                        + f"原始消息: {src_chat_id}/{src_message_id}"
+                    )
+                    return content, broadcast
+
+                # Already exists
+                if resp.status_code == 409:
+                    existing_id = None
+                    if isinstance(data, dict):
+                        existing_id = data.get('existingId') or ((data.get('data') or {}) if isinstance(data.get('data'), dict) else {}).get('id')
+                    content = (
+                        "⚠️ <b>已存在</b>\n\n"
+                        f"IP: <code>{html.escape(ip)}</code>\n"
+                        f"Port: <code>{html.escape(str(port))}</code>\n"
+                        + (f"ID: <code>{html.escape(str(existing_id))}</code>\n" if existing_id else "")
+                        + f"备注: <code>{html.escape(remark)}</code>"
+                    )
+                    broadcast = (
+                        f"⚠️ 已存在: {ip}:{port}\n"
+                        + (f"ID: {existing_id}\n" if existing_id else "")
+                        + f"备注: {remark}\n"
+                        + f"来源用户: {from_user_id}\n"
+                        + f"原始消息: {src_chat_id}/{src_message_id}"
+                    )
+                    return content, broadcast
+
+                # Other failures
+                err = ''
+                if isinstance(data, dict):
+                    err = str(data.get('error') or data.get('message') or '')
+                err = err or getattr(resp, 'text', '')
+                msg = (
+                    "❌ <b>导入失败</b>\n\n"
+                    f"IP: <code>{html.escape(ip)}</code>\n"
+                    f"Port: <code>{html.escape(str(port))}</code>\n"
+                    f"错误: <code>{html.escape(err[:500])}</code>"
+                )
+                return msg, f"✗ 导入失败: {ip}:{port} ({err[:120]})"
+
+            except requests.exceptions.Timeout:
+                msg = f"❌ <b>导入失败</b>：API 请求超时（10s）: <code>{html.escape(ip)}:{html.escape(str(port))}</code>"
+                return msg, f"✗ API超时: {ip}:{port}"
+            except Exception as e:
+                logger.error(f"CFIP import API call failed: {e}")
+                msg = "❌ <b>导入失败</b>：API 请求异常。请查看日志。"
+                return msg, f"✗ API异常: {ip}:{port}"
+
+        # --- Fallback: existing API CRUD ---
+        cfips = self.api_client.get_cf_ips() or []
+        existing = None
+        for item in cfips:
+            if str(item.get('address') or '').strip() == ip and int(item.get('port') or 443) == int(port):
+                existing = item
+                break
+
+        if existing and existing.get('id'):
+            ip_id = existing['id']
+            try:
+                self.api_client.update_cf_ip(ip_id, {'name': remark})
+            except Exception:
+                pass
+            content = (
+                "✅ <b>已存在，已更新备注</b>\n\n"
+                f"IP: <code>{html.escape(ip)}</code>\n"
+                f"Port: <code>{html.escape(str(port))}</code>\n"
+                f"ID: <code>{html.escape(str(ip_id))}</code>\n"
+                f"备注: <code>{html.escape(remark)}</code>"
+            )
+            broadcast = f"✓ 已存在并更新备注: {ip}:{port} (ID:{ip_id})"
+            return content, broadcast
+
+        payload = {
+            'address': ip,
+            'port': int(port),
+            'status': 'disabled',
+            'name': remark,
+        }
+
+        created = self.api_client.create_cf_ip(payload)
+        if created and (created.get('success') or created.get('data') or created.get('id')):
+            created_id = (created.get('data') or {}).get('id') or created.get('id') or ''
+            content = (
+                "✅ <b>入库成功</b>\n\n"
+                f"IP: <code>{html.escape(ip)}</code>\n"
+                f"Port: <code>{html.escape(str(port))}</code>\n"
+                + (f"ID: <code>{html.escape(str(created_id))}</code>\n" if created_id else "")
+                + f"备注: <code>{html.escape(remark)}</code>"
+            )
+            return content, f"✓ 入库成功: {ip}:{port} (ID:{created_id})"
+
+        content = (
+            "❌ <b>入库失败</b>\n\n"
+            "原因：未配置 <code>CFIP_IMPORT_API_URL/KEY</code>，且后端可能不支持 <code>POST /api/cfip</code> 创建。"
+        )
+        return content, f"✗ 入库失败: {ip}:{port}"
+
+    def handle_manual_cf_sync(self, ip_address):
+        try:
+            socket.inet_aton(ip_address)
+        except OSError:
+            return f"❌ <b>IP 格式无效</b>\n\n收到: <code>{html.escape(ip_address)}</code>"
+
+        if not self.cf_api_token or not self.cf_zone_id or not self.cf_record_name:
+            return "❌ <b>Cloudflare 同步配置不完整</b>\n\n请检查 CF_API_TOKEN / CF_ZONE_ID / CF_RECORD_NAME"
+
+        ok = self.sync_cf_dns(ip_address, silent=False)
+        if ok:
+            return (
+                "✅ <b>已手动同步到 Cloudflare</b>\n\n"
+                f"Record: <code>{html.escape(self.cf_record_name)}</code>\n"
+                f"IP: <code>{html.escape(ip_address)}</code>"
+            )
+        return (
+            "❌ <b>同步 Cloudflare 失败</b>\n\n"
+            f"Record: <code>{html.escape(self.cf_record_name)}</code>\n"
+            f"IP: <code>{html.escape(ip_address)}</code>"
+        )
 
     def check_proxy_ips(self):
         pass

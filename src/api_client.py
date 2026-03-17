@@ -104,6 +104,18 @@ class ApiClient:
             logger.error(f"Failed to get CF IPs: {str(e)}")
             return []
 
+    def create_cf_ip(self, data):
+        """Create a new CF IP record.
+
+        Note: backend support depends on API implementation. If unsupported, this
+        will fail with 404/405.
+        """
+        try:
+            return self._retry_request('POST', '/api/cfip', data)
+        except Exception as e:
+            logger.error(f"Failed to create CF IP: {str(e)}")
+            return None
+
     def update_cf_ip(self, id, data):
         try:
             return self._retry_request('PUT', f'/api/cfip/{id}', data)

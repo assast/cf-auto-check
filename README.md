@@ -10,6 +10,9 @@ Cloudflare IP/Domain latency and speed testing service, rewritten in Python with
 - **Multi-Port Support**: Groups IPs by port and tests each group separately.
 - **Check Interval**: Configurable interval for periodic IP checks.
 - **Auto Update**: Updates remarks in the API with format: `IP Region|Latency|SpeedMB/S`.
+- **Telegram Bot Commands**: Built-in Telegram bot long polling with `/cfst`, `/cfst_status`, `/cfst_health`, and manual `/cf_sync <IP>`.
+- **Telegram Proxy Support**: Supports per-Telegram proxy via `TG_PROXY`.
+- **Manual Cloudflare Sync**: Automatic CF DNS sync is disabled in command mode; sync target IP manually with bot command.
 - **Fallback Testing**: Falls back to manual ping testing if CFST fails.
 
 ## Prerequisites
@@ -67,10 +70,11 @@ TEST_MODE=cfip
 ENABLE_AUTO_UPDATE=true
 
 # Telegram Notification (optional)
-TG_ENABLED=false
+TG_ENABLED=true
 TG_BOT_TOKEN=your-bot-token
 TG_CHAT_ID=your-chat-id
 TG_PROXY=                     # Proxy for TG only
+TG_BOT_COMMANDS_ENABLED=true  # Enable built-in bot commands
 ```
 
 ## Usage
@@ -82,6 +86,8 @@ python -m src.main
 ```
 
 ### Run with Docker
+
+After configuring `.env`, the built-in Telegram bot will start automatically when `TG_ENABLED=true` and `TG_BOT_COMMANDS_ENABLED=true`.
 
 #### Using Pre-built Image (Recommended)
 

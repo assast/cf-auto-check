@@ -74,3 +74,14 @@ class Config:
     TG_BOT_TOKEN = os.getenv('TG_BOT_TOKEN', '')
     TG_CHAT_ID = os.getenv('TG_CHAT_ID', '')
     TG_PROXY = os.getenv('TG_PROXY', '')  # e.g., http://127.0.0.1:7890 or socks5://127.0.0.1:1080
+
+    # Telegram bot command listener
+    TG_BOT_COMMANDS_ENABLED = os.getenv('TG_BOT_COMMANDS_ENABLED', 'true').lower() == 'true'
+
+    # CFIP import API (optional): for importing #CF优选IP messages
+    CFIP_IMPORT_API_URL = os.getenv('CFIP_IMPORT_API_URL', '')
+    CFIP_IMPORT_API_KEY = os.getenv('CFIP_IMPORT_API_KEY', '')
+
+    # Optional: also push import result to a Telegram channel/group
+    # Example: -1003460092123
+    TG_IMPORT_NOTIFY_CHANNEL_ID = os.getenv('TG_IMPORT_NOTIFY_CHANNEL_ID', '')
