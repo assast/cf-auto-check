@@ -81,10 +81,13 @@ docker-compose up -d
 4. 结果缓存到 `latency_{port}.csv`
 
 **Phase 2: 速度测试** (`run_speed_phase`)
-1. 从 Phase 1 结果中按延迟排序，所有端口合计取前 `SPEED_TEST_COUNT` 个 IP（按端口比例分配）
-2. 对每个端口组运行 CFST（含下载测速）
-3. 结果缓存到 `speed_{port}.csv`
-4. 按 `SELECT_MODE` 排序，保留前 `SPEED_ENABLE_COUNT` 个
+1. 从 Phase 1 结果中按延迟排序，将候选拆成两组：443 与非 443
+2. 443 端口取前 `SPEED_TEST_COUNT_443` 个 IP，非 443 端口共享取前 `SPEED_TEST_COUNT` 个 IP
+3. 对每个端口组运行 CFST（含下载测速）
+4. 结果缓存到 `speed_{port}.csv`
+5. 按 `SELECT_MODE` 排序，并分别按配额选出启用集合：
+   - 443 端口：`SPEED_ENABLE_COUNT_443`
+   - 非 443 端口：`SPEED_ENABLE_COUNT`
 
 **API 更新**
 5. 使用 `/api/cfip/batch/update` 批量更新所有 CFIP 的测试数据
@@ -135,10 +138,12 @@ docker-compose up -d
 
 #### 测试配置
 - `LATENCY_THREADS=200` - Phase 1/Phase 2 线程数（CFST -n 参数），默认 200，最大 1000
-- `SPEED_TEST_COUNT=20` - Phase 2 所有端口合计下载测速数量（按端口比例分配）
+- `SPEED_TEST_COUNT=20` - Phase 2 非 443 端口共享下载测速数量
+- `SPEED_TEST_COUNT_443=20` - Phase 2 443 端口下载测速数量
 - `MAX_LATENCY=9999` - 平均延迟上限（ms），超过此值的 IP 将被过滤（-tl 参数）
 - `MAX_LOSS=1.0` - 丢包率上限（0.0-1.0），高于此值的 IP 将被过滤（-tlp 参数）
-- `SPEED_ENABLE_COUNT=50` - 选择速度最高的前 M 个 IP 设为启用状态
+- `SPEED_ENABLE_COUNT=50` - Phase 2 非 443 端口共享启用数量
+- `SPEED_ENABLE_COUNT_443=50` - Phase 2 443 端口启用数量
 
 ### 重要实现细节
 

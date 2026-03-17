@@ -102,6 +102,7 @@ class CFAutoCheck:
         remaining_count = limit - len(nonzero_results)
         return nonzero_results + zero_results[:remaining_count]
 
+    def start(self):
         logger.info("CF Auto Check Service Started (Python + CFST)")
         logger.info(f"API URL: {Config.API_URL}")
         logger.info(f"Cron Scheduler: {'Enabled' if self.enable_cron_scheduler else 'Disabled'}")
