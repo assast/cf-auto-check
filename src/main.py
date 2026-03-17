@@ -35,10 +35,12 @@ class CFAutoCheck:
         self.api_trigger_key = Config.API_TRIGGER_KEY
         self.api_trigger_port = Config.API_TRIGGER_PORT
         self.speed_test_count = Config.SPEED_TEST_COUNT
+        self.speed_test_count_443 = Config.SPEED_TEST_COUNT_443
         self.speed_test_url = Config.SPEED_TEST_URL
         self.max_latency = Config.MAX_LATENCY
         self.max_loss = Config.MAX_LOSS
         self.speed_enable_count = Config.SPEED_ENABLE_COUNT
+        self.speed_enable_count_443 = Config.SPEED_ENABLE_COUNT_443
         self.sync_to_cf = Config.SYNC_TO_CF
         self.select_mode = Config.SELECT_MODE
         self.sync_to_cf_filter_port = Config.SYNC_TO_CF_FILTER_PORT
@@ -64,14 +66,40 @@ class CFAutoCheck:
         self.running = False
         sys.exit(0)
 
-    def start(self):
+    def _split_results_by_port_group(self, results):
+        port_443_results = []
+        non_443_results = []
+        for result in results:
+            if result.get('port') == 443:
+                port_443_results.append(result)
+            else:
+                non_443_results.append(result)
+        return port_443_results, non_443_results
+
+    def _select_top_results_with_zero_fill(self, results, limit):
+        if limit <= 0 or not results:
+            return []
+
+        nonzero_results = [r for r in results if r.get('speed', 0) > 0]
+        zero_results = [r for r in results if r.get('speed', 0) == 0]
+
+        if len(nonzero_results) >= limit:
+            return nonzero_results[:limit]
+
+        remaining_count = limit - len(nonzero_results)
+        return nonzero_results + zero_results[:remaining_count]
+
         logger.info("CF Auto Check Service Started (Python + CFST)")
         logger.info(f"API URL: {Config.API_URL}")
         logger.info(f"Cron Scheduler: {'Enabled' if self.enable_cron_scheduler else 'Disabled'}")
         logger.info(f"API Trigger: {'Enabled on port ' + str(self.api_trigger_port) if self.enable_api_trigger else 'Disabled'}")
         logger.info(f"Test Mode: {self.test_mode}")
         logger.info(f"Select Mode: {self.select_mode}")
-        logger.info(f"CFST Threads: {self.latency_threads}, Speed Test Count: {self.speed_test_count}")
+        logger.info(
+            f"CFST Threads: {self.latency_threads}, Speed Test Count(non-443): {self.speed_test_count}, "
+            f"Speed Test Count(443): {self.speed_test_count_443}, Enable Count(non-443): {self.speed_enable_count}, "
+            f"Enable Count(443): {self.speed_enable_count_443}"
+        )
         logger.info(f"Sync to CF Filter Port: {self.sync_to_cf_filter_port if self.sync_to_cf_filter_port > 0 else 'All ports'}")
         logger.info(f"Sync to CF: {'Enabled' if self.sync_to_cf else 'Disabled'}")
         logger.info(f"Sync to CF Cron: {self.sync_to_cf_cron if self.sync_to_cf_cron else 'Disabled'}")
@@ -765,28 +793,40 @@ class CFAutoCheck:
 
     def run_speed_phase(self, latency_results):
         """Phase 2: Select top IPs by latency and run speed tests
-        
+
         Args:
             latency_results: Dict of {port: [results]} from Phase 1
-        
+
         Returns:
             List of all speed test results, sorted by select_mode, or None
         """
         logger.info("=" * 60)
-        logger.info(f"[Phase2] SPEED TESTING (top {self.speed_test_count} total across all ports)")
+        logger.info(
+            f"[Phase2] SPEED TESTING (non-443 top {self.speed_test_count}, 443 top {self.speed_test_count_443})"
+        )
         logger.info("=" * 60)
 
-        # Merge all latency results, sort globally by latency, pick top N
         all_latency = []
         for port, results in latency_results.items():
             for r in results:
                 all_latency.append({**r, 'port': port})
         all_latency.sort(key=lambda x: x['latency'])
-        
-        # Select top SPEED_TEST_COUNT IPs globally by lowest latency
-        selected_global = all_latency[:self.speed_test_count]
-        logger.info(f"[Phase2] Selected {len(selected_global)} IPs globally by lowest latency (from {len(all_latency)} total)")
-        
+
+        latency_443, latency_non_443 = self._split_results_by_port_group(all_latency)
+        selected_443 = latency_443[:self.speed_test_count_443]
+        selected_non_443 = latency_non_443[:self.speed_test_count]
+        selected_global = selected_443 + selected_non_443
+
+        logger.info(
+            f"[Phase2] Selected {len(selected_443)} port-443 IPs (from {len(latency_443)} total, limit {self.speed_test_count_443})"
+        )
+        logger.info(
+            f"[Phase2] Selected {len(selected_non_443)} non-443 IPs (from {len(latency_non_443)} total, limit {self.speed_test_count})"
+        )
+        logger.info(
+            f"[Phase2] Selected {len(selected_global)} total IPs for speed test (from {len(all_latency)} latency results)"
+        )
+
         # Group selected IPs back by port for speed testing
         speed_tasks = {}  # port -> (list of IPs, count)
         for r in selected_global:
@@ -796,7 +836,7 @@ class CFAutoCheck:
             ips, count = speed_tasks[port]
             ips.append(r['address'])
             speed_tasks[port] = (ips, len(ips))
-        
+
         for port, (ips, count) in speed_tasks.items():
             total_for_port = len(latency_results.get(port, []))
             logger.info(f"[Phase2] Port {port}: selected {count} IPs for speed test (from {total_for_port} latency-tested)")
@@ -990,20 +1030,35 @@ class CFAutoCheck:
 
     def _update_cfip_results(self, cfips, cfst_results, latency_results):
         """Update API with CFST results (called after both phases complete)"""
-        # Filter out IPs with zero download speed for enabling
+        speed_results_443, speed_results_non_443 = self._split_results_by_port_group(cfst_results)
         nonzero_speed_results = [r for r in cfst_results if r.get('speed', 0) > 0]
         zero_speed_results = [r for r in cfst_results if r.get('speed', 0) == 0]
         logger.info(f"IPs with non-zero speed: {len(nonzero_speed_results)}, zero speed: {len(zero_speed_results)} (from {len(cfst_results)} total)")
+        logger.info(
+            f"Enable selection groups: 443={len(speed_results_443)} candidates (limit {self.speed_enable_count_443}), "
+            f"non-443={len(speed_results_non_443)} candidates (limit {self.speed_enable_count})"
+        )
 
-        # Priority: non-zero speed IPs first, then fill with zero-speed IPs if needed
-        if len(nonzero_speed_results) >= self.speed_enable_count:
-            top_results = nonzero_speed_results[:self.speed_enable_count]
-            logger.info(f"Using top {len(top_results)} non-zero speed IPs (available: {len(nonzero_speed_results)})")
-        else:
-            remaining_count = self.speed_enable_count - len(nonzero_speed_results)
-            top_results = nonzero_speed_results + zero_speed_results[:remaining_count]
-            logger.info(f"Not enough non-zero speed IPs ({len(nonzero_speed_results)}), adding {len(top_results) - len(nonzero_speed_results)} zero-speed IPs to reach {self.speed_enable_count}")
-        
+        top_results_443 = self._select_top_results_with_zero_fill(speed_results_443, self.speed_enable_count_443)
+        top_results_non_443 = self._select_top_results_with_zero_fill(speed_results_non_443, self.speed_enable_count)
+        top_results = top_results_443 + top_results_non_443
+
+        if len([r for r in speed_results_443 if r.get('speed', 0) > 0]) >= self.speed_enable_count_443:
+            logger.info(f"Using top {len(top_results_443)} non-zero speed port-443 IPs (available: {len([r for r in speed_results_443 if r.get('speed', 0) > 0])})")
+        elif self.speed_enable_count_443 > 0:
+            logger.info(
+                f"Not enough non-zero speed port-443 IPs ({len([r for r in speed_results_443 if r.get('speed', 0) > 0])}), "
+                f"adding {len(top_results_443) - len([r for r in top_results_443 if r.get('speed', 0) > 0])} zero-speed IPs to reach {self.speed_enable_count_443}"
+            )
+
+        if len([r for r in speed_results_non_443 if r.get('speed', 0) > 0]) >= self.speed_enable_count:
+            logger.info(f"Using top {len(top_results_non_443)} non-zero speed non-443 IPs (available: {len([r for r in speed_results_non_443 if r.get('speed', 0) > 0])})")
+        elif self.speed_enable_count > 0:
+            logger.info(
+                f"Not enough non-zero speed non-443 IPs ({len([r for r in speed_results_non_443 if r.get('speed', 0) > 0])}), "
+                f"adding {len(top_results_non_443) - len([r for r in top_results_non_443 if r.get('speed', 0) > 0])} zero-speed IPs to reach {self.speed_enable_count}"
+            )
+
         # Log diagnostic info
         zero_in_top = len([r for r in top_results if r.get('speed', 0) == 0])
         if zero_in_top > 0:
@@ -1015,7 +1070,7 @@ class CFAutoCheck:
 
         # Create mapping from (IP, port) to CFST result
         ip_port_to_result = {(r['address'], r['port']): r for r in cfst_results}
-        
+
         # Also build a latency-only lookup for IPs that passed latency but weren't speed tested
         ip_port_to_latency = {}
         for port_results in latency_results.values():
@@ -1035,30 +1090,30 @@ class CFAutoCheck:
                     region = effective.get('region', '').strip()
                     if not region:
                         ips_need_api.add(ip_addr)
-            
+
             if ips_need_api:
                 self._prefetch_ip_info(ips_need_api)
             else:
                 self._ip_info_cache = {}
                 logger.info(f"All top IPs have CFST region info, skipping IP info API calls")
-            
+
             enabled_count = 0
             batch_updates = []
             enable_ids = []   # IDs to set enabled
             disable_ids = []  # IDs to set disabled
             invalid_ids = []  # IDs to set invalid
-            
+
             for (ip_addr, port), cfip_list in self.ip_port_to_cfips.items():
                 result = ip_port_to_result.get((ip_addr, port))
                 latency_result = ip_port_to_latency.get((ip_addr, port))
-                
+
                 # Use speed result if available, otherwise use latency result
                 effective_result = result or latency_result
-                
+
                 is_duplicate = self.ip_occurrence_count.get(ip_addr, 0) > 1
                 dup_count = self.ip_occurrence_count.get(ip_addr, 0)
                 dup_mark = f"[DUP:{dup_count}] " if is_duplicate else ""
-                
+
                 # Get country/ISP: prioritize CFST region code, fall back to API
                 if effective_result:
                     cfst_region = effective_result.get('region', '').strip()
@@ -1075,7 +1130,7 @@ class CFAutoCheck:
                         else:
                             country = 'N/A'
                             isp = 'N/A'
-                
+
                 for cfip in cfip_list:
                     ip_id = cfip.get('id')
                     original_addr = cfip.get('address')
@@ -1126,7 +1181,7 @@ class CFAutoCheck:
                             'country': 'N/A',
                             'isp': 'N/A'
                         }
-                        
+
                         if is_domain:
                             logger.info(f"Updating {original_addr}:{port} (failed test, fail_count={new_fail_count}, keeping status={current_status}){' [DUP]' if is_duplicate else ''} [DOMAIN-KEEP]")
                         else:
@@ -1142,7 +1197,7 @@ class CFAutoCheck:
                 original_addr = cfip.get('address')
                 current_fail_count = int(cfip.get('fail_count') or 0)
                 current_status = cfip.get('status') or 'enabled'
-                
+
                 new_fail_count = current_fail_count + 1
                 name = f"N/A|N/A|N/A {original_addr}"
                 update_data = {
@@ -1179,7 +1234,7 @@ class CFAutoCheck:
                 self.sync_cf_dns(best_ip)
 
         # Send Telegram notification
-        self.telegram.send_cfip_results(top_results, top_count=self.speed_enable_count)
+        self.telegram.send_cfip_results(top_results, top_count=len(top_results))
 
     def sync_cf_dns(self, ip_address, silent=False):
         """Sync best IP to Cloudflare DNS A record"""
