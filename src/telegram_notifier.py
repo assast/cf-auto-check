@@ -1,5 +1,6 @@
 import requests
 import time
+from typing import Optional
 from .config import Config
 from .logger import logger
 
@@ -168,5 +169,55 @@ class TelegramNotifier:
             f"{ip_line}\n"
             f"⏱ 延迟: {latency:.2f}ms\n"
             f"📊 测试 IP 数: {tested_count}"
+        )
+        return self.send_message(message)
+
+    def send_enabled_maintenance_result(self, source: str, success: bool, summary: Optional[dict] = None):
+        """Send enabled maintenance task result summary to Telegram."""
+        if not self.enabled:
+            return False
+
+        summary = summary or {}
+        source_labels = {
+            'sync_cron': '定时任务',
+            'telegram': 'Telegram',
+            'api': 'API',
+            'manual': '手动',
+            'test': '测试'
+        }
+        source_label = source_labels.get(source, source or 'unknown')
+
+        if success:
+            lines = [
+                "✅ <b>启用数据维护完成</b>",
+                "",
+                f"来源: <code>{source_label}</code>",
+                f"参与记录: <code>{summary.get('tested_count', 0)}</code>",
+                f"写回结果: <code>{summary.get('api_success', 0)}/{summary.get('updated_count', 0)}</code>",
+                f"更新成功: <code>{summary.get('enabled_count', 0)}</code>",
+                f"更新失效: <code>{summary.get('invalid_count', 0)}</code>",
+            ]
+
+            best_result = summary.get('best_sync_result') or {}
+            if best_result:
+                lines.append(
+                    f"同步候选: <code>{best_result.get('address', 'N/A')}:{best_result.get('port', 443)}</code>"
+                )
+                lines.append(
+                    f"速度/延迟: <code>{best_result.get('speed', 0):.2f}MB/s / {best_result.get('latency', 0):.2f}ms</code>"
+                )
+
+            sync_message = summary.get('sync_message')
+            if sync_message:
+                lines.append(f"同步结果: <code>{sync_message}</code>")
+
+            message = "\n".join(lines)
+            return self.send_message(message)
+
+        error_message = summary.get('error') or summary.get('message') or 'unknown error'
+        message = (
+            "❌ <b>启用数据维护失败</b>\n\n"
+            f"来源: <code>{source_label}</code>\n"
+            f"错误: <code>{error_message}</code>"
         )
         return self.send_message(message)

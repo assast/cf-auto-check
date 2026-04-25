@@ -64,6 +64,7 @@ class TelegramBotController:
         commands = [
             {'command': 'start', 'description': '显示完整帮助'},
             {'command': 'cfst', 'description': '触发 CFST 检测（详见 /start）'},
+            {'command': 'cfst_maint', 'description': '触发启用数据维护任务'},
             {'command': 'cfst_status', 'description': '查看 CFST 检测状态'},
             {'command': 'cf_sync', 'description': '手动同步指定 IP 到 Cloudflare'}
         ]
@@ -157,6 +158,13 @@ class TelegramBotController:
 
         if lower == '/cfst_status':
             return self.service.format_status_html()
+        if lower == '/cfst_maint':
+            return self.service.trigger_enabled_maintenance(source='telegram')
+        if lower.startswith('/cfst_maint '):
+            return (
+                "⚠️ <b>/cfst_maint</b> 不需要额外参数。\n\n"
+                "它会直接重测当前启用数据，并把运行结果推送到 Telegram。"
+            )
         if lower.startswith('/cf_sync '):
             ip = cmd.split(None, 1)[1].strip()
             return self.service.handle_manual_cf_sync(ip)
@@ -265,6 +273,7 @@ class TelegramBotController:
             "<code>/cfst force</code> - 强制重跑（删除缓存）\n"
             "<code>/cfst latency force</code> - 强制重跑延迟\n"
             "<code>/cfst speed force</code> - 强制重跑速度\n"
+            "<code>/cfst_maint</code> - 触发启用数据维护，并推送运行结果\n"
             "<code>/cfst_status</code> - 查看检测状态\n"
             "<code>/cf_sync &lt;IP&gt;</code> - 手动同步指定 IP 到 Cloudflare A 记录\n\n"
             "📥 <b>自动入库</b>：直接把频道里那段 <code>#CF优选IP</code> 文本转发给机器人，它会解析 IP/端口并尝试入库。\n"

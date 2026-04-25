@@ -102,6 +102,37 @@ class CFAutoCheck:
         remaining_count = limit - len(nonzero_results)
         return nonzero_results + zero_results[:remaining_count]
 
+    def _sort_speed_results_by_mode(self, results):
+        if not results:
+            return []
+
+        sorted_results = list(results)
+        if self.select_mode == 'lowest_latency':
+            sorted_results.sort(key=lambda x: (x['latency'], -x['speed']))
+        elif self.select_mode == 'lowest_latency_nonzero':
+            nonzero_results = [r for r in sorted_results if r['speed'] > 0]
+            zero_results = [r for r in sorted_results if r['speed'] == 0]
+            nonzero_results.sort(key=lambda x: (x['latency'], -x['speed']))
+            zero_results.sort(key=lambda x: x['latency'])
+            sorted_results = nonzero_results + zero_results
+        else:
+            sorted_results.sort(key=lambda x: (-x['speed'], x['latency']))
+
+        return sorted_results
+
+    def _sort_results_by_highest_speed(self, results):
+        return sorted(
+            results,
+            key=lambda x: (-x.get('speed', 0), x.get('latency', float('inf')), x.get('address', ''))
+        )
+
+    def _build_latency_lookup(self, latency_results):
+        ip_port_to_latency = {}
+        for port_results in latency_results.values():
+            for result in port_results:
+                ip_port_to_latency[(result['address'], result.get('port', 0))] = result
+        return ip_port_to_latency
+
     def start(self):
         logger.info("CF Auto Check Service Started (Python + CFST)")
         logger.info(f"API URL: {Config.API_URL}")
@@ -125,9 +156,11 @@ class CFAutoCheck:
             api_thread = threading.Thread(target=self._run_api_server, daemon=True)
             api_thread.start()
         
-        # Start CF DNS sync cron scheduler if enabled
-        if self.sync_to_cf and self.sync_to_cf_cron:
-            logger.warning("SYNC_TO_CF_CRON is configured but automatic Cloudflare sync is disabled by command-mode policy; ignoring scheduler")
+        # Start enabled-CFIP maintenance scheduler if configured
+        if self.sync_to_cf_cron:
+            maintenance_thread = threading.Thread(target=self._run_cf_dns_sync_scheduler, daemon=True)
+            maintenance_thread.start()
+            logger.info(f"Enabled CFIP maintenance scheduler enabled: {self.sync_to_cf_cron}")
         
         # Run immediately on startup if cron is enabled
         if self.enable_cron_scheduler:
@@ -159,9 +192,14 @@ class CFAutoCheck:
                     except Exception as e:
                         logger.error(f"Unexpected error in main loop: {str(e)}")
         else:
-            # If cron scheduler is disabled, just keep the main thread alive for API server
-            if self.enable_api_trigger:
-                logger.info("Cron scheduler disabled, waiting for API trigger...")
+            # Keep the main thread alive when background services are enabled
+            if self.enable_api_trigger or self.sync_to_cf_cron:
+                wait_reasons = []
+                if self.enable_api_trigger:
+                    wait_reasons.append('API trigger')
+                if self.sync_to_cf_cron:
+                    wait_reasons.append('enabled maintenance scheduler')
+                logger.info(f"Cron scheduler disabled, waiting for {', '.join(wait_reasons)}...")
                 while self.running:
                     time.sleep(60)
             else:
@@ -658,7 +696,7 @@ class CFAutoCheck:
             return True
         return False
 
-    def run_latency_test_for_port(self, port, ips):
+    def run_latency_test_for_port(self, port, ips, result_filename=None, ips_filename=None, use_cache=True):
         """Phase 1: Run latency-only CFST test for a specific port
         
         Uses -dd flag to disable download testing for pure latency measurement.
@@ -671,16 +709,16 @@ class CFAutoCheck:
             return None
 
         # Write IPs to temp file
-        port_ips_file = os.path.join(self.cfst_dir, f'ips_{port}.txt')
+        port_ips_file = os.path.join(self.cfst_dir, ips_filename or f'ips_{port}.txt')
         with open(port_ips_file, 'w') as f:
             for ip in ips:
                 f.write(f"{ip}\n")
 
-        latency_result_file = os.path.join(self.cfst_dir, f'latency_{port}.csv')
+        latency_result_file = os.path.join(self.cfst_dir, result_filename or f'latency_{port}.csv')
 
         # Check cache
         cache_hours = Config.RESULT_CACHE_HOURS
-        if self._check_cache(latency_result_file, cache_hours):
+        if use_cache and self._check_cache(latency_result_file, cache_hours):
             file_age_hours = (time.time() - os.path.getmtime(latency_result_file)) / 3600
             logger.info(f"[Phase1] Using cached latency result for port {port} (age: {file_age_hours:.1f}h, TTL: {cache_hours}h)")
             cached_results = self.parse_cfst_results(latency_result_file)
@@ -709,7 +747,7 @@ class CFAutoCheck:
             return self.parse_cfst_results(latency_result_file)
         return None
 
-    def run_speed_test_for_port(self, port, ips, download_count):
+    def run_speed_test_for_port(self, port, ips, download_count, result_filename=None, ips_filename=None, use_cache=True):
         """Phase 2: Run speed test for selected IPs on a specific port
         
         Tests both latency and download speed on the pre-selected IPs.
@@ -730,16 +768,16 @@ class CFAutoCheck:
             return None
 
         # Write selected IPs to temp file
-        speed_ips_file = os.path.join(self.cfst_dir, f'speed_ips_{port}.txt')
+        speed_ips_file = os.path.join(self.cfst_dir, ips_filename or f'speed_ips_{port}.txt')
         with open(speed_ips_file, 'w') as f:
             for ip in ips:
                 f.write(f"{ip}\n")
 
-        speed_result_file = os.path.join(self.cfst_dir, f'speed_{port}.csv')
+        speed_result_file = os.path.join(self.cfst_dir, result_filename or f'speed_{port}.csv')
 
         # Check cache
         cache_hours = Config.RESULT_CACHE_HOURS
-        if self._check_cache(speed_result_file, cache_hours):
+        if use_cache and self._check_cache(speed_result_file, cache_hours):
             file_age_hours = (time.time() - os.path.getmtime(speed_result_file)) / 3600
             logger.info(f"[Phase2] Using cached speed result for port {port} (age: {file_age_hours:.1f}h, TTL: {cache_hours}h)")
             cached_results = self.parse_cfst_results(speed_result_file)
@@ -895,18 +933,12 @@ class CFAutoCheck:
             return None
 
         # Sort results based on select_mode
+        all_speed_results = self._sort_speed_results_by_mode(all_speed_results)
         if self.select_mode == 'lowest_latency':
-            all_speed_results.sort(key=lambda x: (x['latency'], -x['speed']))
             mode_desc = 'lowest latency'
         elif self.select_mode == 'lowest_latency_nonzero':
-            nonzero_results = [r for r in all_speed_results if r['speed'] > 0]
-            zero_results = [r for r in all_speed_results if r['speed'] == 0]
-            nonzero_results.sort(key=lambda x: (x['latency'], -x['speed']))
-            zero_results.sort(key=lambda x: x['latency'])
-            all_speed_results = nonzero_results + zero_results
             mode_desc = 'lowest latency (non-zero speed first)'
-        else:  # highest_speed (default)
-            all_speed_results.sort(key=lambda x: (-x['speed'], x['latency']))
+        else:
             mode_desc = 'highest speed'
 
         logger.info(f"[Phase2] Speed phase completed: {len(all_speed_results)} IPs tested, sorted by {mode_desc}")
@@ -915,6 +947,218 @@ class CFAutoCheck:
             logger.info(f"  {i}. {r['address']} - {r['speed']:.2f}MB/s, {r['latency']:.2f}ms (port {r.get('port', 'N/A')})")
 
         return all_speed_results
+
+    def _cleanup_maintenance_files(self):
+        if not os.path.exists(self.cfst_dir):
+            return
+
+        prefixes = ('maint_ips_', 'maint_speed_ips_', 'maint_latency_', 'maint_speed_')
+        for filename in os.listdir(self.cfst_dir):
+            if filename.startswith(prefixes):
+                filepath = os.path.join(self.cfst_dir, filename)
+                try:
+                    os.remove(filepath)
+                except Exception as e:
+                    logger.debug(f"[Maintenance] Failed to delete temp file {filename}: {str(e)}")
+
+    def _run_enabled_cfip_tests(self, enabled_cfips):
+        logger.info(f"[Maintenance] Preparing {len(enabled_cfips)} enabled CFIPs for stability re-test")
+        self.export_ips_by_port(enabled_cfips)
+
+        if not self.port_groups:
+            logger.warning("[Maintenance] No enabled IPs available after address resolution")
+            return None, []
+
+        total_ports = len(self.port_groups)
+        latency_results = {}
+        for idx, (port, ips) in enumerate(self.port_groups.items(), 1):
+            logger.info(f"[Maintenance] [Latency {idx}/{total_ports}] Port {port}: testing {len(ips)} enabled IPs")
+            results = self.run_latency_test_for_port(
+                port,
+                ips,
+                result_filename=f'maint_latency_{port}.csv',
+                ips_filename=f'maint_ips_{port}.txt',
+                use_cache=False
+            )
+            if results:
+                for result in results:
+                    result['port'] = port
+                latency_results[port] = results
+                logger.info(f"[Maintenance] [Latency {idx}/{total_ports}] Port {port}: {len(results)} IPs passed latency test")
+            else:
+                logger.warning(f"[Maintenance] [Latency {idx}/{total_ports}] Port {port}: no latency results")
+
+        if not latency_results:
+            logger.error("[Maintenance] No latency results available for enabled CFIPs")
+            return None, []
+
+        all_speed_results = []
+        speed_ports = list(latency_results.items())
+        for idx, (port, port_latency_results) in enumerate(speed_ports, 1):
+            speed_test_ips = [result['address'] for result in port_latency_results]
+            logger.info(f"[Maintenance] [Speed {idx}/{len(speed_ports)}] Port {port}: testing {len(speed_test_ips)} enabled IPs")
+            results = self.run_speed_test_for_port(
+                port,
+                speed_test_ips,
+                len(speed_test_ips),
+                result_filename=f'maint_speed_{port}.csv',
+                ips_filename=f'maint_speed_ips_{port}.txt',
+                use_cache=False
+            )
+            if results:
+                for result in results:
+                    result['port'] = port
+                all_speed_results.extend(results)
+                logger.info(f"[Maintenance] [Speed {idx}/{len(speed_ports)}] Port {port}: {len(results)} IPs completed speed test")
+            else:
+                logger.warning(f"[Maintenance] [Speed {idx}/{len(speed_ports)}] Port {port}: speed test returned no results")
+
+        all_speed_results = self._sort_results_by_highest_speed(all_speed_results)
+        if all_speed_results:
+            logger.info(f"[Maintenance] Completed enabled CFIP speed test for {len(all_speed_results)} IPs")
+        else:
+            logger.warning("[Maintenance] No speed results were produced; will fall back to latency-only data for status updates")
+
+        return latency_results, all_speed_results
+
+    def _update_enabled_cfip_results(self, speed_results, latency_results):
+        """Update only currently enabled CFIPs after maintenance re-test."""
+        ip_port_to_result = {(result['address'], result['port']): result for result in speed_results}
+        ip_port_to_latency = self._build_latency_lookup(latency_results)
+
+        ips_need_api = set()
+        for (ip_addr, port), _ in self.ip_port_to_cfips.items():
+            effective_result = ip_port_to_result.get((ip_addr, port)) or ip_port_to_latency.get((ip_addr, port))
+            if effective_result and not effective_result.get('region', '').strip():
+                ips_need_api.add(ip_addr)
+
+        if ips_need_api:
+            self._prefetch_ip_info(ips_need_api)
+        else:
+            self._ip_info_cache = {}
+
+        batch_updates = []
+        enabled_count = 0
+        invalid_count = 0
+
+        for (ip_addr, port), cfip_list in self.ip_port_to_cfips.items():
+            result = ip_port_to_result.get((ip_addr, port))
+            latency_result = ip_port_to_latency.get((ip_addr, port))
+            effective_result = result or latency_result
+
+            is_duplicate = self.ip_occurrence_count.get(ip_addr, 0) > 1
+            dup_count = self.ip_occurrence_count.get(ip_addr, 0)
+            dup_mark = f"[DUP:{dup_count}] " if is_duplicate else ""
+
+            country = 'N/A'
+            isp = 'N/A'
+            if effective_result:
+                cfst_region = effective_result.get('region', '').strip()
+                if cfst_region:
+                    country = cfst_region
+                    ip_info = self._ip_info_cache.get(ip_addr)
+                    isp = ip_info['isp'] if ip_info else 'N/A'
+                else:
+                    ip_info = self._ip_info_cache.get(ip_addr)
+                    if ip_info:
+                        country = ip_info['country']
+                        isp = ip_info['isp']
+
+            for cfip in cfip_list:
+                ip_id = cfip.get('id')
+                original_addr = cfip.get('address')
+                current_fail_count = int(cfip.get('fail_count') or 0)
+                current_status = cfip.get('status') or 'enabled'
+                is_domain = self.cfip_is_domain.get(ip_id, False)
+
+                if effective_result:
+                    latency_val = effective_result['latency']
+                    speed_mb = result['speed'] if result else 0
+                    speed_val = speed_mb * 1024
+                    name = f"{speed_mb:.2f}MB/s|{latency_val:.2f}ms|{country} {original_addr}{dup_mark}"
+                    update_data = {
+                        'name': name,
+                        'fail_count': 0,
+                        'latency': round(latency_val, 2),
+                        'speed': round(speed_val, 2),
+                        'country': country,
+                        'isp': isp
+                    }
+                    enabled_count += 1
+                    if is_domain:
+                        logger.info(
+                            f"[Maintenance] Updating {original_addr}:{port}: {latency_val:.2f}ms, {speed_mb:.2f}MB/s, {country} "
+                            f"(keeping status={current_status}){' [DUP]' if is_duplicate else ''} [DOMAIN-KEEP]"
+                        )
+                    else:
+                        update_data['status'] = 'enabled'
+                        logger.info(
+                            f"[Maintenance] Updating {original_addr}:{port}: {latency_val:.2f}ms, {speed_mb:.2f}MB/s, {country} (enabled)"
+                            f"{' [DUP]' if is_duplicate else ''}"
+                        )
+                else:
+                    new_fail_count = current_fail_count + 1
+                    update_data = {
+                        'name': f"N/A|N/A|N/A {original_addr}{dup_mark}",
+                        'fail_count': new_fail_count,
+                        'latency': 0,
+                        'speed': 0,
+                        'country': 'N/A',
+                        'isp': 'N/A'
+                    }
+                    if is_domain:
+                        logger.info(
+                            f"[Maintenance] Updating {original_addr}:{port} (failed test, fail_count={new_fail_count}, "
+                            f"keeping status={current_status}){' [DUP]' if is_duplicate else ''} [DOMAIN-KEEP]"
+                        )
+                    else:
+                        update_data['status'] = 'invalid'
+                        invalid_count += 1
+                        logger.info(
+                            f"[Maintenance] Setting invalid {original_addr}:{port} (no valid result, fail_count={new_fail_count})"
+                            f"{' [DUP]' if is_duplicate else ''}"
+                        )
+
+                batch_updates.append((ip_id, update_data))
+
+        for cfip in self.unresolved_cfips:
+            cfip_id = cfip.get('id')
+            original_addr = cfip.get('address')
+            current_fail_count = int(cfip.get('fail_count') or 0)
+            current_status = cfip.get('status') or 'enabled'
+            new_fail_count = current_fail_count + 1
+            update_data = {
+                'name': f"N/A|N/A|N/A {original_addr}",
+                'fail_count': new_fail_count,
+                'latency': 0,
+                'speed': 0,
+                'country': 'N/A',
+                'isp': 'N/A'
+            }
+            if self.cfip_is_domain.get(cfip_id, False):
+                logger.info(
+                    f"[Maintenance] Updating {original_addr} (unresolved, fail_count={new_fail_count}, "
+                    f"keeping status={current_status}) [DOMAIN-KEEP]"
+                )
+            else:
+                update_data['status'] = 'invalid'
+                invalid_count += 1
+                logger.info(f"[Maintenance] Setting invalid {original_addr} (unresolved, fail_count={new_fail_count})")
+            batch_updates.append((cfip_id, update_data))
+
+        success = failed = 0
+        if batch_updates:
+            logger.info(f"[Maintenance] Starting batch update for {len(batch_updates)} enabled CFIPs...")
+            success, failed = self.api_client.batch_update_cf_ips_api(batch_updates)
+            logger.info(f"[Maintenance] Batch update completed: {success} success, {failed} failed")
+
+        return {
+            'enabled_count': enabled_count,
+            'invalid_count': invalid_count,
+            'updated_count': len(batch_updates),
+            'api_success': success,
+            'api_failed': failed
+        }
 
     def parse_cfst_results(self, result_file=None):
         """Parse CFST result.csv file"""
@@ -1032,16 +1276,7 @@ class CFAutoCheck:
                     return
                 
                 # Sort results based on select_mode
-                if self.select_mode == 'lowest_latency':
-                    cfst_results.sort(key=lambda x: (x['latency'], -x['speed']))
-                elif self.select_mode == 'lowest_latency_nonzero':
-                    nonzero = [r for r in cfst_results if r['speed'] > 0]
-                    zero = [r for r in cfst_results if r['speed'] == 0]
-                    nonzero.sort(key=lambda x: (x['latency'], -x['speed']))
-                    zero.sort(key=lambda x: x['latency'])
-                    cfst_results = nonzero + zero
-                else:  # highest_speed
-                    cfst_results.sort(key=lambda x: (-x['speed'], x['latency']))
+                cfst_results = self._sort_speed_results_by_mode(cfst_results)
                 
                 logger.info(f"[Reprocess] Loaded {len(cfst_results)} total speed results from cache")
             else:
@@ -1254,12 +1489,18 @@ class CFAutoCheck:
                 port_filtered = [r for r in cfst_results if r.get('port') == self.sync_to_cf_filter_port]
                 if port_filtered:
                     best_ip = port_filtered[0]['address']
-                    logger.info(f"DNS sync is configured but automatic sync is disabled; best candidate on port {self.sync_to_cf_filter_port}: {best_ip}")
+                    logger.info(
+                        f"Full check best candidate on port {self.sync_to_cf_filter_port}: {best_ip}. "
+                        f"Automatic DNS sync is handled by SYNC_TO_CF_CRON maintenance scheduler."
+                    )
                 else:
                     logger.warning(f"DNS sync candidate search: No IPs found on port {self.sync_to_cf_filter_port}")
             else:
                 best_ip = cfst_results[0]['address']
-                logger.info(f"DNS sync is configured but automatic sync is disabled; best candidate: {best_ip}")
+                logger.info(
+                    f"Full check best candidate: {best_ip}. "
+                    f"Automatic DNS sync is handled by SYNC_TO_CF_CRON maintenance scheduler."
+                )
 
         # Send Telegram notification
         self.telegram.send_cfip_results(top_results, top_count=len(top_results))
@@ -1357,15 +1598,91 @@ class CFAutoCheck:
             logger.error(f"CF DNS sync error: {str(e)}")
             return False
 
+    def _get_current_cf_dns_ip(self):
+        if not self.cf_api_token or not self.cf_zone_id or not self.cf_record_name:
+            return ''
+
+        import requests
+
+        try:
+            headers = {
+                'Authorization': f'Bearer {self.cf_api_token}',
+                'Content-Type': 'application/json'
+            }
+            list_url = f"https://api.cloudflare.com/client/v4/zones/{self.cf_zone_id}/dns_records"
+            params = {'name': self.cf_record_name, 'type': 'A'}
+            response = requests.get(list_url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            if not data.get('success'):
+                return ''
+            records = data.get('result', [])
+            if not records:
+                return ''
+            return records[0].get('content', '')
+        except Exception as e:
+            logger.debug(f"Failed to query current CF DNS IP: {str(e)}")
+            return ''
+
+    def _finalize_enabled_maintenance(self, source, success, message, summary=None, error=None):
+        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.last_check_meta.update({
+            'status': 'success' if success else 'error',
+            'finished_at': finished_at,
+            'message': message,
+            'last_error': error
+        })
+
+        notify_summary = dict(summary or {})
+        notify_summary.setdefault('message', message)
+        if error:
+            notify_summary['error'] = error
+        self.telegram.send_enabled_maintenance_result(source=source, success=success, summary=notify_summary)
+
+    def trigger_enabled_maintenance(self, source='telegram'):
+        """Trigger enabled-CFIP maintenance in background."""
+        if self.check_running:
+            running_phase = self.last_check_meta.get('phase') or 'unknown'
+            return (
+                "⏳ <b>任务正在运行</b>\n\n"
+                f"当前阶段: <code>{html.escape(str(running_phase))}</code>\n"
+                f"来源: <code>{html.escape(str(self.last_check_meta.get('source') or 'unknown'))}</code>"
+            )
+
+        self.last_check_meta.update({
+            'status': 'starting',
+            'phase': 'enabled_maintenance',
+            'force_refresh': True,
+            'source': source,
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'finished_at': None,
+            'message': 'Enabled maintenance queued',
+            'last_error': None
+        })
+
+        def run_async_maintenance():
+            try:
+                self.run_cf_dns_sync(source=source)
+            except Exception as e:
+                logger.error(f"Error in manual enabled maintenance thread: {str(e)}")
+
+        thread = threading.Thread(target=run_async_maintenance, daemon=True)
+        thread.start()
+        return (
+            "🚀 <b>已启动启用数据维护</b>\n\n"
+            "会重测已启用记录的延迟和速度，并尝试同步配置端口下最快的结果到 Cloudflare。\n"
+            "请稍后用 <code>/cfst_status</code> 查看状态。"
+        )
+
     def _run_cf_dns_sync_scheduler(self):
-        """Run independent cron scheduler for CF DNS sync"""
-        logger.info(f"[DNS-Sync] Starting CF DNS sync scheduler with cron: {self.sync_to_cf_cron}")
+        """Run cron scheduler for enabled CFIP maintenance and optional CF sync."""
+        logger.info(f"[Maintenance] Starting enabled CFIP maintenance scheduler with cron: {self.sync_to_cf_cron}")
         
         # Run once on startup
         try:
-            self.run_cf_dns_sync()
+            self.run_cf_dns_sync(source='sync_cron')
         except Exception as e:
-            logger.error(f"[DNS-Sync] Error in initial DNS sync: {str(e)}")
+            logger.error(f"[Maintenance] Error in initial enabled maintenance: {str(e)}")
         
         cron = croniter(self.sync_to_cf_cron, datetime.now())
         
@@ -1374,7 +1691,7 @@ class CFAutoCheck:
             wait_seconds = (next_run - datetime.now()).total_seconds()
             
             if wait_seconds > 0:
-                logger.info(f"[DNS-Sync] Next DNS sync scheduled at: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_seconds:.0f}s)")
+                logger.info(f"[Maintenance] Next enabled maintenance scheduled at: {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_seconds:.0f}s)")
                 
                 while wait_seconds > 0 and self.running:
                     sleep_time = min(wait_seconds, 60)
@@ -1383,173 +1700,150 @@ class CFAutoCheck:
             
             if self.running:
                 try:
-                    self.run_cf_dns_sync()
+                    self.run_cf_dns_sync(source='sync_cron')
                 except Exception as e:
-                    logger.error(f"[DNS-Sync] Error in scheduled DNS sync: {str(e)}")
+                    logger.error(f"[Maintenance] Error in scheduled enabled maintenance: {str(e)}")
 
-    def run_cf_dns_sync(self):
-        """Run lightweight latency-only test on enabled IPs and sync best to CF DNS.
-        
-        This is independent from the main check cycle. It:
-        1. Fetches enabled CFIPs from API
-        2. Filters by SYNC_TO_CF_FILTER_PORT
-        3. Runs latency-only CFST test
-        4. Syncs lowest-latency IP to CF DNS
-        """
-        logger.info("[DNS-Sync] Starting CF DNS sync cycle...")
-        
-        # Check prerequisites
-        if not self.cf_api_token or not self.cf_zone_id or not self.cf_record_name:
-            logger.warning("[DNS-Sync] Missing CF DNS configuration (CF_API_TOKEN, CF_ZONE_ID, or CF_RECORD_NAME)")
+    def run_cf_dns_sync(self, source='sync_cron'):
+        """Re-test enabled CFIPs, update their status, then sync fastest 443 result to Cloudflare."""
+        if self.check_running:
+            logger.warning("[Maintenance] Another check is already running, skipping enabled maintenance cycle")
             return
-        
-        if not self.check_cfst_binary():
-            logger.error("[DNS-Sync] CFST binary not available")
-            return
-        
-        # Fetch enabled CFIPs from API
+
+        self.check_running = True
+        started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        self.last_check_meta.update({
+            'status': 'running',
+            'phase': 'enabled_maintenance',
+            'force_refresh': True,
+            'source': source,
+            'started_at': started_at,
+            'finished_at': None,
+            'message': 'Running enabled maintenance cycle',
+            'last_error': None
+        })
+
         try:
+            logger.info("[Maintenance] Starting enabled CFIP maintenance cycle...")
+            self._cleanup_maintenance_files()
+
+            if not self.check_cfst_binary():
+                raise RuntimeError("CFST binary not available")
+
             cfips = self.api_client.get_cf_ips()
             if not cfips:
-                logger.warning("[DNS-Sync] No CF IPs found from API")
+                message = "No CF IPs found from API"
+                logger.warning(f"[Maintenance] {message}")
+                self._finalize_enabled_maintenance(
+                    source=source,
+                    success=True,
+                    message=message,
+                    summary={'tested_count': 0, 'enabled_count': 0, 'invalid_count': 0, 'sync_message': 'No data'}
+                )
                 return
-        except Exception as e:
-            logger.error(f"[DNS-Sync] Failed to fetch CF IPs: {str(e)}")
-            return
-        
-        # Filter: only enabled IPs
-        enabled_cfips = [ip for ip in cfips if ip.get('status') == 'enabled']
-        if not enabled_cfips:
-            logger.warning("[DNS-Sync] No enabled CF IPs found")
-            return
-        
-        # Filter by port
-        filter_port = self.sync_to_cf_filter_port
-        if filter_port > 0:
-            port_filtered = [ip for ip in enabled_cfips if ip.get('port', 443) == filter_port]
-            if not port_filtered:
-                logger.warning(f"[DNS-Sync] No enabled IPs found on port {filter_port}")
+
+            enabled_cfips = [ip for ip in cfips if ip.get('status') == 'enabled']
+            if not enabled_cfips:
+                message = "No enabled CF IPs found"
+                logger.warning(f"[Maintenance] {message}")
+                self._finalize_enabled_maintenance(
+                    source=source,
+                    success=True,
+                    message=message,
+                    summary={'tested_count': 0, 'enabled_count': 0, 'invalid_count': 0, 'sync_message': 'No enabled records'}
+                )
                 return
-            logger.info(f"[DNS-Sync] Filtered {len(port_filtered)} enabled IPs on port {filter_port} (from {len(enabled_cfips)} enabled)")
-            enabled_cfips = port_filtered
-        else:
-            filter_port = 443  # Default port for CFST test
-            logger.info(f"[DNS-Sync] Using all {len(enabled_cfips)} enabled IPs")
-        
-        # Resolve addresses to IPs
-        test_ips = []
-        ip_to_address = {}  # Map resolved IP back to original address
-        for cfip in enabled_cfips:
-            address = cfip.get('address')
-            try:
-                socket.inet_aton(address)
-                ip_addr = address
-            except socket.error:
-                ip_addr = self._resolve_domain(address)
-                if ip_addr is None:
-                    logger.warning(f"[DNS-Sync] Could not resolve {address}, skipping")
-                    continue
-                logger.debug(f"[DNS-Sync] Resolved {address} -> {ip_addr}")
-            
-            if ip_addr not in test_ips:
-                test_ips.append(ip_addr)
-                ip_to_address[ip_addr] = address
-        
-        if not test_ips:
-            logger.warning("[DNS-Sync] No IPs available after resolution")
-            return
-        
-        logger.info(f"[DNS-Sync] Testing {len(test_ips)} unique IPs for latency (port {filter_port})")
-        
-        # Write IPs to temp file
-        dns_sync_ips_file = os.path.join(self.cfst_dir, 'dns_sync_ips.txt')
-        dns_sync_result_file = os.path.join(self.cfst_dir, 'dns_sync_result.csv')
-        
-        with open(dns_sync_ips_file, 'w') as f:
-            for ip in test_ips:
-                f.write(f"{ip}\n")
-        
-        # Build CFST command - latency only
-        cmd = [
-            self.cfst_path,
-            '-f', dns_sync_ips_file,
-            '-o', dns_sync_result_file,
-            '-tp', str(filter_port),
-            '-n', str(self.latency_threads),
-            '-dd',  # Disable download testing
-            '-tl', str(self.max_latency),
-            '-tlr', str(self.max_loss),
-            '-p', str(len(test_ips)),
-        ]
-        
-        logger.info(f"[DNS-Sync] Command: {' '.join(cmd)}")
-        
-        if not self._run_cfst_process(cmd, f'dns-sync-{filter_port}'):
-            logger.error("[DNS-Sync] CFST latency test failed")
-            return
-        
-        # Parse results
-        results = self.parse_cfst_results(dns_sync_result_file)
-        if not results:
-            logger.error("[DNS-Sync] No results from latency test")
-            return
-        
-        # Sort by latency (ascending)
-        results.sort(key=lambda x: x['latency'])
-        
-        best = results[0]
-        best_ip = best['address']
-        best_latency = best['latency']
-        
-        logger.info(f"[DNS-Sync] Best IP: {best_ip} ({best_latency:.2f}ms) from {len(results)} results")
-        
-        # Log top 5 for reference
-        for i, r in enumerate(results[:5], 1):
-            logger.info(f"[DNS-Sync]   {i}. {r['address']} - {r['latency']:.2f}ms")
-        
-        # Get current DNS record IP for notification
-        import requests as req_lib
-        old_ip = ''
-        try:
-            headers = {
-                'Authorization': f'Bearer {self.cf_api_token}',
-                'Content-Type': 'application/json'
-            }
-            list_url = f"https://api.cloudflare.com/client/v4/zones/{self.cf_zone_id}/dns_records"
-            params = {'name': self.cf_record_name, 'type': 'A'}
-            response = req_lib.get(list_url, headers=headers, params=params, timeout=30)
-            if response.ok:
-                data = response.json()
-                records = data.get('result', [])
-                if records:
-                    old_ip = records[0].get('content', '')
-        except Exception:
-            pass
-        
-        # Sync to CF DNS
-        updated = (old_ip != best_ip)
-        success = self.sync_cf_dns(best_ip, silent=True)
-        
-        if success:
-            # Send TG notification with result
-            self.telegram.send_dns_sync_result(
-                record_name=self.cf_record_name,
-                best_ip=best_ip,
-                latency=best_latency,
-                tested_count=len(results),
-                old_ip=old_ip,
-                updated=updated
+
+            latency_results, speed_results = self._run_enabled_cfip_tests(enabled_cfips)
+            if not latency_results:
+                raise RuntimeError("No latency results from enabled CFIPs")
+
+            summary = self._update_enabled_cfip_results(speed_results, latency_results)
+            logger.info(
+                f"[Maintenance] Enabled maintenance updated {summary['updated_count']} records: "
+                f"{summary['enabled_count']} enabled, {summary['invalid_count']} invalid"
             )
-        
-        # Cleanup temp files
-        for f in [dns_sync_ips_file, dns_sync_result_file]:
-            try:
-                if os.path.exists(f):
-                    os.remove(f)
-            except Exception:
-                pass
-        
-        logger.info("[DNS-Sync] DNS sync cycle completed")
+
+            sync_message = "Cloudflare sync skipped"
+            best_result_summary = None
+            filter_port = self.sync_to_cf_filter_port
+            filtered_sync_results = [result for result in speed_results if result.get('speed', 0) > 0]
+            if filter_port > 0:
+                filtered_sync_results = [
+                    result for result in filtered_sync_results
+                    if result.get('port') == filter_port
+                ]
+            filtered_sync_results = self._sort_results_by_highest_speed(filtered_sync_results)
+
+            if filtered_sync_results:
+                best_result = filtered_sync_results[0]
+                best_ip = best_result['address']
+                best_result_summary = {
+                    'address': best_result['address'],
+                    'port': best_result.get('port', filter_port if filter_port > 0 else 443),
+                    'speed': best_result.get('speed', 0),
+                    'latency': best_result.get('latency', 0)
+                }
+                logger.info(
+                    f"[Maintenance] Best sync candidate on port {best_result_summary['port']}: {best_ip} "
+                    f"({best_result['speed']:.2f}MB/s, {best_result['latency']:.2f}ms)"
+                )
+
+                if self.sync_to_cf:
+                    old_ip = self._get_current_cf_dns_ip()
+                    if self.sync_cf_dns(best_ip, silent=True):
+                        if old_ip and old_ip != best_ip:
+                            sync_message = f"{old_ip} -> {best_ip}"
+                        elif old_ip == best_ip:
+                            sync_message = f"unchanged {best_ip}"
+                        else:
+                            sync_message = f"created {best_ip}"
+                    else:
+                        sync_message = f"Cloudflare sync failed for {best_ip}"
+                else:
+                    sync_message = f"best sync candidate {best_ip}:{best_result_summary['port']} (SYNC_TO_CF disabled)"
+                    logger.info(f"[Maintenance] {sync_message}")
+            else:
+                if filter_port > 0:
+                    sync_message = f"No positive-speed result available on port {filter_port} for Cloudflare sync"
+                else:
+                    sync_message = "No positive-speed result available for Cloudflare sync"
+                logger.warning(f"[Maintenance] {sync_message}")
+
+            final_message = (
+                f"Enabled maintenance completed: updated={summary['updated_count']}, "
+                f"enabled={summary['enabled_count']}, invalid={summary['invalid_count']}; {sync_message}"
+            )
+            self._finalize_enabled_maintenance(
+                source=source,
+                success=True,
+                message=final_message,
+                summary={
+                    'tested_count': len(enabled_cfips),
+                    'updated_count': summary['updated_count'],
+                    'enabled_count': summary['enabled_count'],
+                    'invalid_count': summary['invalid_count'],
+                    'api_success': summary['api_success'],
+                    'api_failed': summary['api_failed'],
+                    'best_sync_result': best_result_summary,
+                    'sync_message': sync_message
+                }
+            )
+            logger.info(f"[Maintenance] Cycle completed. {sync_message}")
+
+        except Exception as e:
+            logger.error(f"[Maintenance] Enabled maintenance failed: {str(e)}")
+            self._finalize_enabled_maintenance(
+                source=source,
+                success=False,
+                message=f'Enabled maintenance failed: {e}',
+                summary={'tested_count': 0},
+                error=str(e)
+            )
+            raise
+        finally:
+            self._cleanup_maintenance_files()
+            self.check_running = False
 
     def trigger_manual_check(self, phase='all', force_refresh=False, source='manual'):
         """Trigger a manual check in background."""
@@ -1624,7 +1918,7 @@ class CFAutoCheck:
         checks.append(("Telegram proxy", Config.TG_PROXY or 'not set'))
         checks.append(("Auto update CFIP", 'enabled' if self.enable_auto_update else 'disabled'))
         checks.append(("Auto sync to Cloudflare", 'enabled' if self.sync_to_cf else 'disabled'))
-        checks.append(("Sync cron", self.sync_to_cf_cron or 'disabled'))
+        checks.append(("Enabled maintenance cron", self.sync_to_cf_cron or 'disabled'))
         checks.append(("CF API token", 'set' if self.cf_api_token else 'missing'))
         checks.append(("CF zone", self.cf_zone_id or 'missing'))
         checks.append(("CF record", self.cf_record_name or 'missing'))

@@ -10,9 +10,10 @@ Cloudflare IP/Domain latency and speed testing service, rewritten in Python with
 - **Multi-Port Support**: Groups IPs by port and tests each group separately.
 - **Check Interval**: Configurable interval for periodic IP checks.
 - **Auto Update**: Updates remarks in the API with format: `IP Region|Latency|SpeedMB/S`.
-- **Telegram Bot Commands**: Built-in Telegram bot long polling with `/cfst`, `/cfst_status`, `/cfst_health`, and manual `/cf_sync <IP>`.
+- **Enabled Stability Maintenance**: `SYNC_TO_CF_CRON` re-tests enabled CFIPs for latency and speed, updates their status, and syncs the fastest result matching `SYNC_TO_CF_FILTER_PORT` to Cloudflare DNS.
+- **Telegram Bot Commands**: Built-in Telegram bot long polling with `/cfst`, `/cfst_maint`, `/cfst_status`, `/cfst_health`, and manual `/cf_sync <IP>`.
 - **Telegram Proxy Support**: Supports per-Telegram proxy via `TG_PROXY`.
-- **Manual Cloudflare Sync**: Automatic CF DNS sync is disabled in command mode; sync target IP manually with bot command.
+- **Manual Cloudflare Sync**: Still supports manual `/cf_sync <IP>` override when you need to force a target IP.
 - **Fallback Testing**: Falls back to manual ping testing if CFST fails.
 
 ## Prerequisites
@@ -57,7 +58,7 @@ API_USE_SESSION_TOKEN=true
 CHECK_CRON=0 * * * *          # Every hour at minute 0
 
 # CFST Configuration
-CONCURRENT_TESTS=5
+LATENCY_THREADS=50
 
 # Download speed test configuration
 SPEED_TEST_COUNT=20       # Number of non-443 IP:port to speed test (shared across non-443 ports)
@@ -71,6 +72,14 @@ TEST_MODE=cfip
 # Enable/Disable Auto Update
 ENABLE_AUTO_UPDATE=true
 
+# Enabled maintenance + Cloudflare sync
+SYNC_TO_CF=true
+CF_API_TOKEN=your-cloudflare-api-token
+CF_ZONE_ID=your-zone-id
+CF_RECORD_NAME=cf.example.com
+SYNC_TO_CF_FILTER_PORT=443
+SYNC_TO_CF_CRON=*/30 * * * *  # Re-test enabled CFIPs and sync the fastest result on the configured port every 30 minutes
+
 # Telegram Notification (optional)
 TG_ENABLED=true
 TG_BOT_TOKEN=your-bot-token
@@ -78,6 +87,8 @@ TG_CHAT_ID=your-chat-id
 TG_PROXY=                     # Proxy for TG only
 TG_BOT_COMMANDS_ENABLED=true  # Enable built-in bot commands
 ```
+
+`SYNC_TO_CF_CRON` runs an independent maintenance cycle for currently `enabled` CFIPs: it re-tests latency and download speed, writes back the refreshed metrics and status for those records, then syncs the fastest result matching `SYNC_TO_CF_FILTER_PORT` to Cloudflare. Keep `SYNC_TO_CF_FILTER_PORT=443` if you want the previous “只同步 443” behavior; set it to `0` to allow all ports. This maintenance path always updates the participating enabled records, even when `ENABLE_AUTO_UPDATE=false`.
 
 ## Usage
 

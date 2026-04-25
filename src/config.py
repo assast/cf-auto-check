@@ -58,9 +58,9 @@ class Config:
     CF_ZONE_ID = os.getenv('CF_ZONE_ID', '')      # Zone ID of the domain
     CF_RECORD_NAME = os.getenv('CF_RECORD_NAME', '')  # DNS A record name to update (e.g., 'cf.example.com')
     
-    # CF DNS Sync Cron (independent lightweight sync scheduler)
-    # When set, runs latency-only test on enabled IPs filtered by SYNC_TO_CF_FILTER_PORT
-    # and syncs the lowest latency IP to CF DNS at the specified schedule
+    # Enabled CFIP maintenance cron
+    # When set, re-tests enabled CFIPs for latency and speed, updates their status,
+    # then syncs the fastest result matching SYNC_TO_CF_FILTER_PORT to Cloudflare DNS
     SYNC_TO_CF_CRON = os.getenv('SYNC_TO_CF_CRON', '')  # Empty = disabled
 
     # Test Mode: cfip, proxyip, outbound, all
