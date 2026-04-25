@@ -1,16 +1,16 @@
-# Changelog
+# 更新日志
 
-All notable changes to this project will be documented in this file.
+这个文件用于记录项目中的重要变更。
 
 ## Unreleased - 2026-04-25
 
-### Added
-- Added enabled-CFIP maintenance scheduling via `SYNC_TO_CF_CRON` to re-test enabled records for latency and speed.
-- Added Telegram command `/cfst_maint` to trigger enabled-CFIP maintenance manually.
-- Added Telegram maintenance result notifications with sync summary, tested count, update count, and best sync candidate details.
+### 新增
+- 新增基于 `SYNC_TO_CF_CRON` 的启用数据维护任务，定时重测已启用记录的延迟和速度。
+- 新增 Telegram 命令 `/cfst_maint`，可手动触发启用数据维护任务。
+- 新增 Telegram 维护结果通知，包含同步摘要、参与数量、写回数量和同步候选详情。
 
-### Changed
-- Changed maintenance sync selection to honor `SYNC_TO_CF_FILTER_PORT`; keep `443` to preserve the previous behavior, or set `0` to allow all ports.
-- Changed maintenance updates to preserve `DOMAIN-KEEP` semantics for domain-based records when resolution or testing fails.
-- Changed service startup behavior so the process stays alive when only the enabled maintenance scheduler is configured.
-- Updated configuration examples and README to describe the maintenance workflow and Telegram trigger.
+### 调整
+- 维护任务的同步目标重新遵循 `SYNC_TO_CF_FILTER_PORT`；保持 `443` 可延续原有行为，设为 `0` 则允许全端口参与选择。
+- 维护任务在域名解析失败或测速失败时恢复 `DOMAIN-KEEP` 语义，不再把域名记录直接标记为 `invalid`。
+- 调整服务启动逻辑，使仅启用维护调度器时进程也会常驻运行。
+- 更新配置示例和 README，补充维护任务和 Telegram 触发说明。
