@@ -11,9 +11,10 @@ Cloudflare IP/Domain latency and speed testing service, rewritten in Python with
 - **Check Interval**: Configurable interval for periodic IP checks.
 - **Auto Update**: Updates remarks in the API with format: `IP Region|Latency|SpeedMB/S`.
 - **Enabled Stability Maintenance**: `SYNC_TO_CF_CRON` re-tests enabled CFIPs for latency and speed, updates their status, and syncs the fastest result matching `SYNC_TO_CF_FILTER_PORT` to Cloudflare DNS.
-- **Telegram Bot Commands**: Built-in Telegram bot long polling with `/cfst`, `/cfst_maint`, `/cfst_status`, `/cfst_health`, and manual `/cf_sync <IP>`.
+- **Telegram Bot Commands**: Built-in Telegram bot long polling with `/cfst`, `/cfst_maint`, `/cfst_blacklist_current`, `/cfst_status`, `/cfst_health`, and manual `/cf_sync <IP>`.
 - **Telegram Proxy Support**: Supports per-Telegram proxy via `TG_PROXY`.
 - **Manual Cloudflare Sync**: Still supports manual `/cf_sync <IP>` override when you need to force a target IP.
+- **Current CF Sync Blacklist**: Reads the current Cloudflare DNS IP and can blacklist it before immediately re-running enabled maintenance.
 - **Fallback Testing**: Falls back to manual ping testing if CFST fails.
 
 ## Prerequisites
@@ -80,6 +81,11 @@ CF_RECORD_NAME=cf.example.com
 SYNC_TO_CF_FILTER_PORT=443
 SYNC_TO_CF_CRON=*/30 * * * *  # Re-test enabled CFIPs and sync the fastest result on the configured port every 30 minutes
 
+# Optional local GET trigger API
+ENABLE_API_TRIGGER=true
+API_TRIGGER_KEY=your-trigger-key
+API_TRIGGER_PORT=8080
+
 # Telegram Notification (optional)
 TG_ENABLED=true
 TG_BOT_TOKEN=your-bot-token
@@ -89,6 +95,14 @@ TG_BOT_COMMANDS_ENABLED=true  # Enable built-in bot commands
 ```
 
 `SYNC_TO_CF_CRON` runs an independent maintenance cycle for currently `enabled` CFIPs: it re-tests latency and download speed, writes back the refreshed metrics and status for those records, then syncs the fastest result matching `SYNC_TO_CF_FILTER_PORT` to Cloudflare. Keep `SYNC_TO_CF_FILTER_PORT=443` if you want the previous “只同步 443” behavior; set it to `0` to allow all ports. This maintenance path always updates the participating enabled records, even when `ENABLE_AUTO_UPDATE=false`.
+
+To blacklist the CFIP matching the current Cloudflare DNS A record and immediately re-run enabled maintenance, call:
+
+```text
+GET /blacklist-current-cf?key=your-trigger-key
+```
+
+The same action is available from Telegram with `/cfst_blacklist_current`. Maintenance and normal CFIP checks skip records where `sync_blacklisted=1`.
 
 ## Usage
 

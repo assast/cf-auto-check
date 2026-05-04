@@ -133,6 +133,153 @@ class CFAutoCheck:
                 ip_port_to_latency[(result['address'], result.get('port', 0))] = result
         return ip_port_to_latency
 
+    def _normalize_positive_int(self, value):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    def _is_sync_blacklisted(self, cfip):
+        value = cfip.get('sync_blacklisted')
+        if value is None:
+            value = cfip.get('blacklisted')
+        if isinstance(value, str):
+            return value.strip().lower() in ['1', 'true', 'yes', 'on']
+        return bool(value)
+
+    def _filter_sync_allowed_cfips(self, cfips, context):
+        allowed = [cfip for cfip in cfips if not self._is_sync_blacklisted(cfip)]
+        skipped = len(cfips) - len(allowed)
+        if skipped:
+            logger.info(f"{context}: skipped {skipped} sync-blacklisted CFIP(s)")
+        return allowed
+
+    def _cfip_ref_from_record(self, cfip):
+        cfip_id = self._normalize_positive_int(cfip.get('id'))
+        if not cfip_id:
+            return None
+        return {
+            'id': cfip_id,
+            'address': str(cfip.get('address') or '').strip(),
+            'port': self._normalize_positive_int(cfip.get('port')) or 443,
+            'sync_blacklisted': 1 if self._is_sync_blacklisted(cfip) else 0
+        }
+
+    def _dedupe_cfip_refs(self, refs):
+        deduped = []
+        seen = set()
+        for ref in refs or []:
+            if not isinstance(ref, dict):
+                continue
+            cfip_id = self._normalize_positive_int(ref.get('id'))
+            if not cfip_id or cfip_id in seen:
+                continue
+            item = dict(ref)
+            item['id'] = cfip_id
+            item['port'] = self._normalize_positive_int(item.get('port')) or 443
+            seen.add(cfip_id)
+            deduped.append(item)
+        return deduped
+
+    def _find_cfip_refs_for_ip(self, ip_address, port=None):
+        target_port = self._normalize_positive_int(port)
+        cfips = self.api_client.get_cf_ips() or []
+        exact_refs = []
+
+        for cfip in cfips:
+            record_port = self._normalize_positive_int(cfip.get('port')) or 443
+            if target_port and record_port != target_port:
+                continue
+            address = str(cfip.get('address') or '').strip()
+            if address == ip_address:
+                ref = self._cfip_ref_from_record(cfip)
+                if ref:
+                    exact_refs.append(ref)
+
+        if exact_refs:
+            return self._dedupe_cfip_refs(exact_refs)
+
+        resolved_refs = []
+        for cfip in cfips:
+            record_port = self._normalize_positive_int(cfip.get('port')) or 443
+            if target_port and record_port != target_port:
+                continue
+            address = str(cfip.get('address') or '').strip()
+            if not address or address == ip_address:
+                continue
+            try:
+                socket.inet_aton(address)
+                continue
+            except OSError:
+                pass
+
+            resolved = self._resolve_domain(address)
+            if resolved == ip_address:
+                ref = self._cfip_ref_from_record(cfip)
+                if ref:
+                    resolved_refs.append(ref)
+
+        return self._dedupe_cfip_refs(resolved_refs)
+
+    def blacklist_current_cf_and_trigger_maintenance(self, source='api'):
+        if self.check_running:
+            return {
+                'success': False,
+                'error': 'Check already in progress',
+                'phase': self.last_check_meta.get('phase'),
+                'source': self.last_check_meta.get('source')
+            }, 409
+
+        if not self.cf_api_token or not self.cf_zone_id or not self.cf_record_name:
+            return {
+                'success': False,
+                'error': 'Cloudflare DNS configuration incomplete'
+            }, 400
+
+        current_ip = self._get_current_cf_dns_ip()
+        if not current_ip:
+            return {
+                'success': False,
+                'error': 'No current Cloudflare DNS A record IP found'
+            }, 404
+
+        target_port = self.sync_to_cf_filter_port if self.sync_to_cf_filter_port > 0 else None
+        refs = self._find_cfip_refs_for_ip(current_ip, target_port)
+        if not refs:
+            refs = self._find_cfip_refs_for_ip(current_ip)
+
+        ids = [ref['id'] for ref in refs]
+        if not ids:
+            return {
+                'success': False,
+                'error': 'Current Cloudflare sync IP has no matching CFIP record',
+                'current_ip': current_ip,
+                'port': target_port
+            }, 404
+
+        blacklist_result = self.api_client.batch_blacklist_cf_ips(ids, sync_blacklisted=True)
+        if not blacklist_result.get('success'):
+            return {
+                'success': False,
+                'error': 'Failed to blacklist current CFIP records',
+                'current_ip': current_ip,
+                'port': target_port,
+                'blacklist': blacklist_result
+            }, 502
+
+        maintenance_message = self.trigger_enabled_maintenance(source=source)
+        return {
+            'success': True,
+            'message': 'Current Cloudflare sync IP blacklisted and enabled maintenance triggered',
+            'current_ip': current_ip,
+            'port': target_port,
+            'blacklisted_ids': ids,
+            'blacklist': blacklist_result,
+            'maintenance': maintenance_message,
+            'cfip_refs': refs
+        }, 200
+
     def start(self):
         logger.info("CF Auto Check Service Started (Python + CFST)")
         logger.info(f"API URL: {Config.API_URL}")
@@ -216,6 +363,12 @@ class CFAutoCheck:
         class TriggerHandler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
                 logger.debug(f"API: {args[0]}")
+
+            def _write_json(self, status_code, payload):
+                self.send_response(status_code)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(payload, ensure_ascii=False).encode())
             
             def do_GET(self):
                 parsed = urlparse(self.path)
@@ -231,6 +384,9 @@ class CFAutoCheck:
                 
                 # Check API key for all other endpoints
                 provided_key = query.get('key', [''])[0]
+                if parsed.path == '/blacklist-current-cf' and not service.api_trigger_key:
+                    self._write_json(403, {'error': 'API_TRIGGER_KEY is required for this endpoint'})
+                    return
                 if service.api_trigger_key and provided_key != service.api_trigger_key:
                     self.send_response(401)
                     self.send_header('Content-Type', 'application/json')
@@ -263,6 +419,10 @@ class CFAutoCheck:
                     if force_refresh:
                         msg += ' (force refresh)'
                     self.wfile.write(json.dumps({'message': msg, 'phase': phase, 'force': force_refresh, 'detail': response}).encode())
+
+                elif parsed.path == '/blacklist-current-cf':
+                    result, status_code = service.blacklist_current_cf_and_trigger_maintenance(source='api')
+                    self._write_json(status_code, result)
                 
                 elif parsed.path == '/status':
                     self.send_response(200)
@@ -1215,6 +1375,10 @@ class CFAutoCheck:
                 return
 
             logger.info(f"Found {len(cfips)} CF IPs")
+            cfips = self._filter_sync_allowed_cfips(cfips, "Full check")
+            if not cfips:
+                logger.warning("No sync-allowed CF IPs found")
+                return
 
             # Group IPs by port
             self.export_ips_by_port(cfips)
@@ -1742,7 +1906,13 @@ class CFAutoCheck:
                 )
                 return
 
-            enabled_cfips = [ip for ip in cfips if ip.get('status') == 'enabled']
+            enabled_cfips = [
+                ip for ip in cfips
+                if ip.get('status') == 'enabled' and not self._is_sync_blacklisted(ip)
+            ]
+            skipped_blacklisted = len([ip for ip in cfips if ip.get('status') == 'enabled' and self._is_sync_blacklisted(ip)])
+            if skipped_blacklisted:
+                logger.info(f"[Maintenance] Skipped {skipped_blacklisted} sync-blacklisted enabled CFIP(s)")
             if not enabled_cfips:
                 message = "No enabled CF IPs found"
                 logger.warning(f"[Maintenance] {message}")
@@ -2085,6 +2255,33 @@ class CFAutoCheck:
             "原因：未配置 <code>CFIP_IMPORT_API_URL/KEY</code>，且后端可能不支持 <code>POST /api/cfip</code> 创建。"
         )
         return content, f"✗ 入库失败: {ip}:{port}"
+
+    def handle_blacklist_current_cf_sync(self):
+        result, status_code = self.blacklist_current_cf_and_trigger_maintenance(source='telegram')
+        if result.get('success'):
+            blacklist = result.get('blacklist') or {}
+            ids = ','.join(str(i) for i in result.get('blacklisted_ids') or [])
+            port = result.get('port') or '-'
+            return (
+                "✅ <b>已拉黑当前 CF 同步 IP</b>\n\n"
+                f"IP: <code>{html.escape(str(result.get('current_ip') or '-'))}</code>\n"
+                f"Port: <code>{html.escape(str(port))}</code>\n"
+                f"CFIP ID: <code>{html.escape(ids or '-')}</code>\n"
+                f"黑名单写入: <code>{html.escape(str(blacklist.get('changes', 0)))}/{html.escape(str(blacklist.get('requested', 0)))}</code>\n\n"
+                "已重新触发启用数据维护任务，请稍后用 <code>/cfst_status</code> 查看状态。"
+            )
+
+        if status_code == 409:
+            return (
+                "⏳ <b>任务正在运行</b>\n\n"
+                f"当前阶段: <code>{html.escape(str(result.get('phase') or 'unknown'))}</code>\n"
+                f"来源: <code>{html.escape(str(result.get('source') or 'unknown'))}</code>"
+            )
+
+        return (
+            "❌ <b>拉黑当前 CF 同步 IP 失败</b>\n\n"
+            f"错误: <code>{html.escape(str(result.get('error') or 'unknown'))}</code>"
+        )
 
     def handle_manual_cf_sync(self, ip_address):
         try:

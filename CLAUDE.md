@@ -61,6 +61,7 @@ docker-compose up -d
    - 支持三种资源类型：cfip、proxyip、outbound
    - **批量 API**：`batch_update_cf_ips_api()` 调用 `/api/cfip/batch/update` 批量更新
    - **批量状态**：`batch_status_cf_ips()` 调用 `/api/cfip/batch/status`
+   - **批量黑名单**：`batch_blacklist_cf_ips()` 调用 `/api/cfip/batch/blacklist` 更新 `sync_blacklisted`
 
 3. **TelegramNotifier (src/telegram_notifier.py)** - Telegram 通知
    - 独立的代理配置（仅用于 Telegram API）
@@ -95,6 +96,8 @@ docker-compose up -d
 7. 获取 IP 地理信息（ipapi.is API）
 8. 同步 CF DNS + 发送 Telegram 通知
 
+`sync_blacklisted=1` 的 CFIP 会在普通检测和启用维护任务中跳过，不参与测速、状态更新或 Cloudflare DNS 同步候选选择。
+
 #### 缓存和重跑支持
 
 - **缓存文件**：`latency_{port}.csv`（Phase 1）、`speed_{port}.csv`（Phase 2）
@@ -118,10 +121,20 @@ docker-compose up -d
   - `/trigger?key=xxx&phase=reprocess` - 使用缓存的延迟+速度数据重新生成结果（不运行 CFST）
   - `/trigger?key=xxx&force=true` - 强制重跑（删除缓存）
   - `/trigger?key=xxx&phase=latency&force=true` - 强制重跑延迟
+  - `/blacklist-current-cf?key=xxx` - 查询当前 Cloudflare DNS A 记录 IP，拉黑匹配的 CFIP，并触发启用数据维护
   - `/status?key=xxx` - 查看状态
   - `/health` - 健康检查
 - API key 验证
 - 防止并发检测
+- `/blacklist-current-cf` 必须配置 `API_TRIGGER_KEY`，同时依赖 `CF_API_TOKEN`、`CF_ZONE_ID`、`CF_RECORD_NAME` 查询当前 DNS A 记录。
+
+#### 当前 CF 同步 IP 拉黑流程
+
+1. 通过 Cloudflare DNS API 查询 `CF_RECORD_NAME` 当前 A 记录 IP。
+2. 使用当前 IP 在管理 API 的 CFIP 列表中定位记录；如果 `SYNC_TO_CF_FILTER_PORT>0`，优先按该端口匹配。
+3. 调用 `/api/cfip/batch/blacklist` 将匹配记录的 `sync_blacklisted` 置为 `1`。
+4. 异步触发启用数据维护任务，重新测速未拉黑的 enabled CFIP 并同步新的最优候选。
+5. Telegram 命令 `/cfst_blacklist_current` 与 HTTP 接口复用同一流程。
 
 ### 配置说明
 

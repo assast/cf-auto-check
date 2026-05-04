@@ -123,6 +123,22 @@ class ApiClient:
             logger.error(f"Failed to update CF IP {id}: {str(e)}")
             return None
 
+    def set_cf_ip_blacklist(self, id, sync_blacklisted=True):
+        """Set CF sync blacklist flag for a single CF IP record."""
+        payload = {'sync_blacklisted': 1 if sync_blacklisted else 0}
+        try:
+            result = self._retry_request('POST', f'/api/cfip/{id}/blacklist', payload)
+            if result and result.get('success'):
+                return result
+        except Exception as e:
+            logger.warning(f"Dedicated blacklist API failed for CF IP {id}: {str(e)}, falling back to PUT")
+
+        try:
+            return self.update_cf_ip(id, payload)
+        except Exception as e:
+            logger.error(f"Failed to set blacklist for CF IP {id}: {str(e)}")
+            return None
+
     def get_proxy_ips(self):
         try:
             data = self._retry_request('GET', '/api/proxyip')
@@ -234,6 +250,59 @@ class ApiClient:
         except Exception as e:
             logger.error(f"Batch status update failed: {str(e)}")
             return False
+
+    def batch_blacklist_cf_ips(self, ids, sync_blacklisted=True):
+        """Batch update sync blacklist flag for multiple CF IP records."""
+        unique_ids = []
+        seen = set()
+        for value in ids:
+            try:
+                ip_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if ip_id > 0 and ip_id not in seen:
+                seen.add(ip_id)
+                unique_ids.append(ip_id)
+
+        if not unique_ids:
+            return {'success': True, 'requested': 0, 'changes': 0}
+
+        flag = 1 if sync_blacklisted else 0
+        try:
+            result = self._retry_request('POST', '/api/cfip/batch/blacklist', {
+                'ids': unique_ids,
+                'sync_blacklisted': flag
+            })
+            if result and result.get('success'):
+                data = result.get('data') or {}
+                logger.info(f"Batch blacklist update: {len(unique_ids)} IPs set to {flag}")
+                return {
+                    'success': True,
+                    'requested': data.get('requested', len(unique_ids)),
+                    'changes': data.get('changes', 0),
+                    'sync_blacklisted': data.get('sync_blacklisted', flag),
+                    'raw': result
+                }
+        except Exception as e:
+            logger.warning(f"Batch blacklist API failed: {str(e)}, falling back to individual updates")
+
+        changes = 0
+        failed = 0
+        for ip_id in unique_ids:
+            result = self.set_cf_ip_blacklist(ip_id, sync_blacklisted=sync_blacklisted)
+            if result and result.get('success'):
+                data = result.get('data') or {}
+                changes += data.get('changes', 1)
+            else:
+                failed += 1
+
+        return {
+            'success': failed == 0,
+            'requested': len(unique_ids),
+            'changes': changes,
+            'failed': failed,
+            'sync_blacklisted': flag
+        }
 
     def batch_update_cf_ips(self, updates, max_workers=10):
         """Batch update CF IPs using concurrent requests (legacy fallback)
