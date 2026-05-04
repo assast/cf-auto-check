@@ -63,6 +63,10 @@ class Config:
     # then syncs the fastest result matching SYNC_TO_CF_FILTER_PORT to Cloudflare DNS
     SYNC_TO_CF_CRON = os.getenv('SYNC_TO_CF_CRON', '')  # Empty = disabled
 
+    # Whether to run an enabled-CFIP maintenance cycle immediately on service start.
+    # Default false: only run on the configured SYNC_TO_CF_CRON schedule.
+    RUN_MAINTENANCE_ON_STARTUP = os.getenv('RUN_MAINTENANCE_ON_STARTUP', 'false').lower() == 'true'
+
     # Test Mode: cfip, proxyip, outbound, all
     TEST_MODE = os.getenv('TEST_MODE', 'cfip')
     

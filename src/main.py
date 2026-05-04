@@ -1841,12 +1841,15 @@ class CFAutoCheck:
     def _run_cf_dns_sync_scheduler(self):
         """Run cron scheduler for enabled CFIP maintenance and optional CF sync."""
         logger.info(f"[Maintenance] Starting enabled CFIP maintenance scheduler with cron: {self.sync_to_cf_cron}")
-        
-        # Run once on startup
-        try:
-            self.run_cf_dns_sync(source='sync_cron')
-        except Exception as e:
-            logger.error(f"[Maintenance] Error in initial enabled maintenance: {str(e)}")
+
+        # Optionally run once on startup (controlled by RUN_MAINTENANCE_ON_STARTUP, default false)
+        if Config.RUN_MAINTENANCE_ON_STARTUP:
+            try:
+                self.run_cf_dns_sync(source='sync_cron')
+            except Exception as e:
+                logger.error(f"[Maintenance] Error in initial enabled maintenance: {str(e)}")
+        else:
+            logger.info("[Maintenance] Skipping initial run on startup (RUN_MAINTENANCE_ON_STARTUP=false)")
         
         cron = croniter(self.sync_to_cf_cron, datetime.now())
         
