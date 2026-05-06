@@ -96,12 +96,14 @@ class ApiClient:
                 
         return None
 
-    def get_cf_ips(self):
+    def get_cf_ips(self, raise_on_error=False):
         try:
             data = self._retry_request('GET', '/api/cfip')
             return data.get('data', [])
         except Exception as e:
             logger.error(f"Failed to get CF IPs: {str(e)}")
+            if raise_on_error:
+                raise
             return []
 
     def create_cf_ip(self, data):

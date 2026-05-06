@@ -182,9 +182,9 @@ class CFAutoCheck:
             deduped.append(item)
         return deduped
 
-    def _find_cfip_refs_for_ip(self, ip_address, port=None):
+    def _find_cfip_refs_for_ip(self, ip_address, port=None, cfips=None):
         target_port = self._normalize_positive_int(port)
-        cfips = self.api_client.get_cf_ips() or []
+        cfips = cfips if cfips is not None else (self.api_client.get_cf_ips() or [])
         exact_refs = []
 
         for cfip in cfips:
@@ -245,9 +245,20 @@ class CFAutoCheck:
             }, 404
 
         target_port = self.sync_to_cf_filter_port if self.sync_to_cf_filter_port > 0 else None
-        refs = self._find_cfip_refs_for_ip(current_ip, target_port)
+        try:
+            cfips = self.api_client.get_cf_ips(raise_on_error=True) or []
+        except Exception as e:
+            return {
+                'success': False,
+                'error': 'Failed to query CFIP records',
+                'current_ip': current_ip,
+                'port': target_port,
+                'detail': str(e)
+            }, 502
+
+        refs = self._find_cfip_refs_for_ip(current_ip, target_port, cfips=cfips)
         if not refs:
-            refs = self._find_cfip_refs_for_ip(current_ip)
+            refs = self._find_cfip_refs_for_ip(current_ip, cfips=cfips)
 
         ids = [ref['id'] for ref in refs]
         if not ids:
