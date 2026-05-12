@@ -140,20 +140,82 @@ class CFAutoCheck:
             return None
         return number if number > 0 else None
 
-    def _is_sync_blacklisted(self, cfip):
-        value = cfip.get('sync_blacklisted')
+    def _parse_bool_value(self, value, default=None):
         if value is None:
-            value = cfip.get('blacklisted')
+            return default
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if not text:
+            return default
+        if text in ['1', 'true', 'yes', 'on']:
+            return True
+        if text in ['0', 'false', 'no', 'off']:
+            return False
+        return default
+
+    def _normalize_blacklist_field(self, blacklist_type, default=None):
+        if blacklist_type is None:
+            return default
+        value = str(blacklist_type).strip().lower()
+        if not value:
+            return default
+        mapping = {
+            'dns': 'sync_blacklisted',
+            'dns_blacklisted': 'sync_blacklisted',
+            'sync': 'sync_blacklisted',
+            'sync_blacklisted': 'sync_blacklisted',
+            'node': 'node_blacklisted',
+            'node_blacklisted': 'node_blacklisted',
+        }
+        return mapping.get(value)
+
+    def _is_truthy_flag(self, value):
         if isinstance(value, str):
             return value.strip().lower() in ['1', 'true', 'yes', 'on']
         return bool(value)
 
-    def _filter_sync_allowed_cfips(self, cfips, context):
-        allowed = [cfip for cfip in cfips if not self._is_sync_blacklisted(cfip)]
+    def _get_blacklist_flag(self, cfip, *keys):
+        for key in keys:
+            value = cfip.get(key)
+            if value is not None:
+                return self._is_truthy_flag(value)
+        return False
+
+    def _is_dns_blacklisted(self, cfip):
+        return self._get_blacklist_flag(cfip, 'sync_blacklisted', 'dns_blacklisted', 'blacklisted')
+
+    def _is_node_blacklisted(self, cfip):
+        return self._get_blacklist_flag(cfip, 'node_blacklisted')
+
+    def _filter_node_allowed_cfips(self, cfips, context):
+        allowed = [cfip for cfip in cfips if not self._is_node_blacklisted(cfip)]
         skipped = len(cfips) - len(allowed)
         if skipped:
-            logger.info(f"{context}: skipped {skipped} sync-blacklisted CFIP(s)")
+            logger.info(f"{context}: skipped {skipped} node-blacklisted CFIP(s)")
         return allowed
+
+    def _serialize_cfip_blacklist_info(self, cfip):
+        return {
+            'id': self._normalize_positive_int(cfip.get('id')),
+            'address': str(cfip.get('address') or '').strip(),
+            'port': self._normalize_positive_int(cfip.get('port')) or 443,
+            'status': str(cfip.get('status') or '').strip() or None,
+            'name': str(cfip.get('name') or '').strip() or None,
+            'sync_blacklisted': 1 if self._is_dns_blacklisted(cfip) else 0,
+            'node_blacklisted': 1 if self._is_node_blacklisted(cfip) else 0,
+        }
+
+    def _select_enabled_maintenance_cfips(self, cfips):
+        enabled_cfips = [
+            ip for ip in cfips
+            if ip.get('status') == 'enabled' and not self._is_node_blacklisted(ip)
+        ]
+        skipped = len([
+            ip for ip in cfips
+            if ip.get('status') == 'enabled' and self._is_node_blacklisted(ip)
+        ])
+        return enabled_cfips, skipped
 
     def _cfip_ref_from_record(self, cfip):
         cfip_id = self._normalize_positive_int(cfip.get('id'))
@@ -163,7 +225,8 @@ class CFAutoCheck:
             'id': cfip_id,
             'address': str(cfip.get('address') or '').strip(),
             'port': self._normalize_positive_int(cfip.get('port')) or 443,
-            'sync_blacklisted': 1 if self._is_sync_blacklisted(cfip) else 0
+            'sync_blacklisted': 1 if self._is_dns_blacklisted(cfip) else 0,
+            'node_blacklisted': 1 if self._is_node_blacklisted(cfip) else 0
         }
 
     def _dedupe_cfip_refs(self, refs):
@@ -222,6 +285,163 @@ class CFAutoCheck:
 
         return self._dedupe_cfip_refs(resolved_refs)
 
+    def _is_dns_sync_candidate_allowed(self, result):
+        key = (result.get('address'), self._normalize_positive_int(result.get('port')) or 443)
+        cfip_list = getattr(self, 'ip_port_to_cfips', {}).get(key, [])
+        if not cfip_list:
+            return True
+        return any(not self._is_dns_blacklisted(cfip) for cfip in cfip_list)
+
+    def _filter_dns_sync_candidates(self, results, context):
+        allowed = []
+        skipped = 0
+        for result in results:
+            port = self._normalize_positive_int(result.get('port')) or 443
+            if self._is_dns_sync_candidate_allowed(result):
+                allowed.append(result)
+                continue
+            skipped += 1
+            logger.info(f"{context} Skipping DNS-blacklisted sync candidate {result.get('address')}:{port}")
+        if skipped:
+            logger.info(f"{context} skipped {skipped} DNS-blacklisted sync candidate(s)")
+        return allowed, skipped
+
+    def query_cfip_blacklist_records(
+        self,
+        blacklist_type=None,
+        blacklisted=None,
+        ids=None,
+        address=None,
+        port=None,
+        status=None,
+        limit=None
+    ):
+        field_name = self._normalize_blacklist_field(blacklist_type)
+        if blacklist_type and not field_name:
+            return {
+                'success': False,
+                'error': f'Unsupported blacklist type: {blacklist_type}'
+            }, 400
+
+        blacklisted_flag = self._parse_bool_value(blacklisted, default=None)
+        if blacklisted is not None and blacklisted_flag is None:
+            return {
+                'success': False,
+                'error': f'Invalid blacklisted value: {blacklisted}'
+            }, 400
+
+        if blacklisted_flag is not None and not field_name:
+            return {
+                'success': False,
+                'error': 'blacklisted filter requires blacklist type'
+            }, 400
+
+        limit_value = self._normalize_positive_int(limit)
+        target_ids = set()
+        for raw_id in ids or []:
+            ip_id = self._normalize_positive_int(raw_id)
+            if ip_id:
+                target_ids.add(ip_id)
+
+        target_address = str(address or '').strip()
+        target_status = str(status or '').strip().lower()
+        target_port = self._normalize_positive_int(port)
+
+        try:
+            cfips = self.api_client.get_cf_ips(raise_on_error=True) or []
+        except Exception as e:
+            return {
+                'success': False,
+                'error': 'Failed to query CFIP records',
+                'detail': str(e)
+            }, 502
+
+        items = []
+        for cfip in cfips:
+            cfip_id = self._normalize_positive_int(cfip.get('id'))
+            if target_ids and cfip_id not in target_ids:
+                continue
+
+            record_address = str(cfip.get('address') or '').strip()
+            if target_address and record_address != target_address:
+                continue
+
+            record_port = self._normalize_positive_int(cfip.get('port')) or 443
+            if target_port and record_port != target_port:
+                continue
+
+            record_status = str(cfip.get('status') or '').strip().lower()
+            if target_status and record_status != target_status:
+                continue
+
+            if field_name:
+                field_value = self._is_dns_blacklisted(cfip) if field_name == 'sync_blacklisted' else self._is_node_blacklisted(cfip)
+                if blacklisted_flag is not None and field_value != blacklisted_flag:
+                    continue
+
+            items.append(self._serialize_cfip_blacklist_info(cfip))
+            if limit_value and len(items) >= limit_value:
+                break
+
+        return {
+            'success': True,
+            'blacklist_type': 'dns' if field_name == 'sync_blacklisted' else ('node' if field_name == 'node_blacklisted' else None),
+            'field_name': field_name,
+            'filters': {
+                'ids': sorted(target_ids) if target_ids else [],
+                'address': target_address or None,
+                'port': target_port,
+                'status': target_status or None,
+                'blacklisted': blacklisted_flag,
+                'limit': limit_value,
+            },
+            'count': len(items),
+            'items': items
+        }, 200
+
+    def set_cfip_blacklist_records(self, blacklist_type, ids=None, blacklisted=True):
+        field_name = self._normalize_blacklist_field(blacklist_type)
+        if not field_name:
+            return {
+                'success': False,
+                'error': f'Unsupported blacklist type: {blacklist_type}'
+            }, 400
+
+        target_ids = []
+        seen = set()
+        for raw_id in ids or []:
+            ip_id = self._normalize_positive_int(raw_id)
+            if ip_id and ip_id not in seen:
+                seen.add(ip_id)
+                target_ids.append(ip_id)
+
+        if not target_ids:
+            return {
+                'success': False,
+                'error': 'No valid CFIP ids provided'
+            }, 400
+
+        blacklist_flag = self._parse_bool_value(blacklisted, default=None)
+        if blacklist_flag is None:
+            return {
+                'success': False,
+                'error': f'Invalid blacklisted value: {blacklisted}'
+            }, 400
+
+        result = self.api_client.batch_blacklist_cf_ips(
+            target_ids,
+            blacklisted=blacklist_flag,
+            field_name=field_name
+        )
+        status_code = 200 if result.get('success') else 502
+        result.update({
+            'blacklist_type': 'dns' if field_name == 'sync_blacklisted' else 'node',
+            'field_name': field_name,
+            'blacklisted': blacklist_flag,
+            'ids': target_ids
+        })
+        return result, status_code
+
     def blacklist_current_cf_and_trigger_maintenance(self, source='api'):
         if self.check_running:
             return {
@@ -269,7 +489,11 @@ class CFAutoCheck:
                 'port': target_port
             }, 404
 
-        blacklist_result = self.api_client.batch_blacklist_cf_ips(ids, sync_blacklisted=True)
+        blacklist_result = self.api_client.batch_blacklist_cf_ips(
+            ids,
+            field_name='sync_blacklisted',
+            blacklisted=True
+        )
         if not blacklist_result.get('success'):
             return {
                 'success': False,
@@ -282,7 +506,7 @@ class CFAutoCheck:
         maintenance_message = self.trigger_enabled_maintenance(source=source)
         return {
             'success': True,
-            'message': 'Current Cloudflare sync IP blacklisted and enabled maintenance triggered',
+            'message': 'Current Cloudflare sync IP added to DNS blacklist and enabled maintenance triggered',
             'current_ip': current_ip,
             'port': target_port,
             'blacklisted_ids': ids,
@@ -380,6 +604,19 @@ class CFAutoCheck:
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps(payload, ensure_ascii=False).encode())
+
+            def _query_arg(self, query, key, default=''):
+                return query.get(key, [default])[0]
+
+            def _query_ids(self, query):
+                values = []
+                for key in ['id', 'ids']:
+                    for raw in query.get(key, []):
+                        for part in str(raw).split(','):
+                            part = part.strip()
+                            if part:
+                                values.append(part)
+                return values
             
             def do_GET(self):
                 parsed = urlparse(self.path)
@@ -433,6 +670,26 @@ class CFAutoCheck:
 
                 elif parsed.path == '/blacklist-current-cf':
                     result, status_code = service.blacklist_current_cf_and_trigger_maintenance(source='api')
+                    self._write_json(status_code, result)
+
+                elif parsed.path == '/cfip-blacklist/query':
+                    result, status_code = service.query_cfip_blacklist_records(
+                        blacklist_type=self._query_arg(query, 'type', ''),
+                        blacklisted=self._query_arg(query, 'blacklisted', None),
+                        ids=self._query_ids(query),
+                        address=self._query_arg(query, 'address', ''),
+                        port=self._query_arg(query, 'port', ''),
+                        status=self._query_arg(query, 'status', ''),
+                        limit=self._query_arg(query, 'limit', '')
+                    )
+                    self._write_json(status_code, result)
+
+                elif parsed.path == '/cfip-blacklist/set':
+                    result, status_code = service.set_cfip_blacklist_records(
+                        blacklist_type=self._query_arg(query, 'type', ''),
+                        ids=self._query_ids(query),
+                        blacklisted=self._query_arg(query, 'blacklisted', 'true')
+                    )
                     self._write_json(status_code, result)
                 
                 elif parsed.path == '/status':
@@ -1386,9 +1643,9 @@ class CFAutoCheck:
                 return
 
             logger.info(f"Found {len(cfips)} CF IPs")
-            cfips = self._filter_sync_allowed_cfips(cfips, "Full check")
+            cfips = self._filter_node_allowed_cfips(cfips, "Full check")
             if not cfips:
-                logger.warning("No sync-allowed CF IPs found")
+                logger.warning("No node-allowed CF IPs found")
                 return
 
             # Group IPs by port
@@ -1660,22 +1917,39 @@ class CFAutoCheck:
 
         # Sync best IP to Cloudflare A record if enabled
         if self.sync_to_cf and cfst_results:
-            if self.sync_to_cf_filter_port > 0:
-                port_filtered = [r for r in cfst_results if r.get('port') == self.sync_to_cf_filter_port]
-                if port_filtered:
-                    best_ip = port_filtered[0]['address']
+            filter_port = self.sync_to_cf_filter_port
+            positive_sync_results = [r for r in cfst_results if r.get('speed', 0) > 0]
+            if filter_port > 0:
+                positive_sync_results = [r for r in positive_sync_results if r.get('port') == filter_port]
+            positive_sync_results = self._sort_results_by_highest_speed(positive_sync_results)
+            sync_candidates, skipped_dns_blacklisted = self._filter_dns_sync_candidates(
+                positive_sync_results,
+                "Full check DNS candidate search:"
+            )
+
+            if sync_candidates:
+                best_result = sync_candidates[0]
+                best_ip = best_result['address']
+                best_port = best_result.get('port', filter_port if filter_port > 0 else 443)
+                if filter_port > 0:
                     logger.info(
-                        f"Full check best candidate on port {self.sync_to_cf_filter_port}: {best_ip}. "
+                        f"Full check best candidate on port {best_port}: {best_ip}. "
                         f"Automatic DNS sync is handled by SYNC_TO_CF_CRON maintenance scheduler."
                     )
                 else:
-                    logger.warning(f"DNS sync candidate search: No IPs found on port {self.sync_to_cf_filter_port}")
+                    logger.info(
+                        f"Full check best candidate: {best_ip}:{best_port}. "
+                        f"Automatic DNS sync is handled by SYNC_TO_CF_CRON maintenance scheduler."
+                    )
+            elif skipped_dns_blacklisted:
+                if filter_port > 0:
+                    logger.warning(f"DNS sync candidate search: all positive-speed results on port {filter_port} are DNS-blacklisted")
+                else:
+                    logger.warning("DNS sync candidate search: all positive-speed results are DNS-blacklisted")
+            elif filter_port > 0:
+                logger.warning(f"DNS sync candidate search: No positive-speed IPs found on port {filter_port}")
             else:
-                best_ip = cfst_results[0]['address']
-                logger.info(
-                    f"Full check best candidate: {best_ip}. "
-                    f"Automatic DNS sync is handled by SYNC_TO_CF_CRON maintenance scheduler."
-                )
+                logger.warning("DNS sync candidate search: No positive-speed IPs found")
 
         # Send Telegram notification
         self.telegram.send_cfip_results(top_results, top_count=len(top_results))
@@ -1920,13 +2194,9 @@ class CFAutoCheck:
                 )
                 return
 
-            enabled_cfips = [
-                ip for ip in cfips
-                if ip.get('status') == 'enabled' and not self._is_sync_blacklisted(ip)
-            ]
-            skipped_blacklisted = len([ip for ip in cfips if ip.get('status') == 'enabled' and self._is_sync_blacklisted(ip)])
+            enabled_cfips, skipped_blacklisted = self._select_enabled_maintenance_cfips(cfips)
             if skipped_blacklisted:
-                logger.info(f"[Maintenance] Skipped {skipped_blacklisted} sync-blacklisted enabled CFIP(s)")
+                logger.info(f"[Maintenance] Skipped {skipped_blacklisted} node-blacklisted enabled CFIP(s)")
             if not enabled_cfips:
                 message = "No enabled CF IPs found"
                 logger.warning(f"[Maintenance] {message}")
@@ -1958,6 +2228,10 @@ class CFAutoCheck:
                     if result.get('port') == filter_port
                 ]
             filtered_sync_results = self._sort_results_by_highest_speed(filtered_sync_results)
+            filtered_sync_results, skipped_dns_blacklisted = self._filter_dns_sync_candidates(
+                filtered_sync_results,
+                "[Maintenance]"
+            )
 
             if filtered_sync_results:
                 best_result = filtered_sync_results[0]
@@ -1988,7 +2262,12 @@ class CFAutoCheck:
                     sync_message = f"best sync candidate {best_ip}:{best_result_summary['port']} (SYNC_TO_CF disabled)"
                     logger.info(f"[Maintenance] {sync_message}")
             else:
-                if filter_port > 0:
+                if skipped_dns_blacklisted:
+                    if filter_port > 0:
+                        sync_message = f"All positive-speed results on port {filter_port} are DNS-blacklisted for Cloudflare sync"
+                    else:
+                        sync_message = "All positive-speed results are DNS-blacklisted for Cloudflare sync"
+                elif filter_port > 0:
                     sync_message = f"No positive-speed result available on port {filter_port} for Cloudflare sync"
                 else:
                     sync_message = "No positive-speed result available for Cloudflare sync"
@@ -2277,7 +2556,7 @@ class CFAutoCheck:
             ids = ','.join(str(i) for i in result.get('blacklisted_ids') or [])
             port = result.get('port') or '-'
             return (
-                "✅ <b>已拉黑当前 CF 同步 IP</b>\n\n"
+                "✅ <b>已将当前 CF 同步 IP 加入 DNS 黑名单</b>\n\n"
                 f"IP: <code>{html.escape(str(result.get('current_ip') or '-'))}</code>\n"
                 f"Port: <code>{html.escape(str(port))}</code>\n"
                 f"CFIP ID: <code>{html.escape(ids or '-')}</code>\n"
@@ -2293,7 +2572,7 @@ class CFAutoCheck:
             )
 
         return (
-            "❌ <b>拉黑当前 CF 同步 IP 失败</b>\n\n"
+            "❌ <b>写入当前 CF 同步 IP 的 DNS 黑名单失败</b>\n\n"
             f"错误: <code>{html.escape(str(result.get('error') or 'unknown'))}</code>"
         )
 

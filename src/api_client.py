@@ -125,9 +125,36 @@ class ApiClient:
             logger.error(f"Failed to update CF IP {id}: {str(e)}")
             return None
 
-    def set_cf_ip_blacklist(self, id, sync_blacklisted=True):
-        """Set CF sync blacklist flag for a single CF IP record."""
-        payload = {'sync_blacklisted': 1 if sync_blacklisted else 0}
+    def _normalize_blacklist_type(self, field_name):
+        if field_name in ['sync_blacklisted', 'dns_blacklisted', 'blacklisted']:
+            return ('dns', 'sync_blacklisted')
+        if field_name == 'node_blacklisted':
+            return ('node', 'node_blacklisted')
+        raise ValueError(f"Unsupported blacklist field: {field_name}")
+
+    def _build_blacklist_payload(self, field_name, blacklisted):
+        blacklist_type, normalized_field = self._normalize_blacklist_type(field_name)
+        flag = 1 if blacklisted else 0
+        payload = {
+            'blacklist_type': blacklist_type,
+            'value': flag,
+        }
+        if normalized_field == 'sync_blacklisted':
+            payload['sync_blacklisted'] = flag
+            payload['blacklisted'] = flag
+        else:
+            payload['node_blacklisted'] = flag
+        return payload
+
+    def _build_blacklist_update_payload(self, field_name, blacklisted):
+        _, normalized_field = self._normalize_blacklist_type(field_name)
+        flag = 1 if blacklisted else 0
+        return {normalized_field: flag}
+
+    def set_cf_ip_blacklist(self, id, blacklisted=True, field_name='sync_blacklisted'):
+        """Set a blacklist flag for a single CF IP record."""
+        payload = self._build_blacklist_payload(field_name, blacklisted)
+        update_payload = self._build_blacklist_update_payload(field_name, blacklisted)
         try:
             result = self._retry_request('POST', f'/api/cfip/{id}/blacklist', payload)
             if result and result.get('success'):
@@ -136,7 +163,7 @@ class ApiClient:
             logger.warning(f"Dedicated blacklist API failed for CF IP {id}: {str(e)}, falling back to PUT")
 
         try:
-            return self.update_cf_ip(id, payload)
+            return self.update_cf_ip(id, update_payload)
         except Exception as e:
             logger.error(f"Failed to set blacklist for CF IP {id}: {str(e)}")
             return None
@@ -253,8 +280,8 @@ class ApiClient:
             logger.error(f"Batch status update failed: {str(e)}")
             return False
 
-    def batch_blacklist_cf_ips(self, ids, sync_blacklisted=True):
-        """Batch update sync blacklist flag for multiple CF IP records."""
+    def batch_blacklist_cf_ips(self, ids, blacklisted=True, field_name='sync_blacklisted'):
+        """Batch update a blacklist flag for multiple CF IP records."""
         unique_ids = []
         seen = set()
         for value in ids:
@@ -269,42 +296,56 @@ class ApiClient:
         if not unique_ids:
             return {'success': True, 'requested': 0, 'changes': 0}
 
-        flag = 1 if sync_blacklisted else 0
+        blacklist_type, normalized_field = self._normalize_blacklist_type(field_name)
+        flag = 1 if blacklisted else 0
+        payload = {'ids': unique_ids}
+        payload.update(self._build_blacklist_payload(field_name, blacklisted))
         try:
-            result = self._retry_request('POST', '/api/cfip/batch/blacklist', {
-                'ids': unique_ids,
-                'sync_blacklisted': flag
-            })
+            result = self._retry_request('POST', '/api/cfip/batch/blacklist', payload)
             if result and result.get('success'):
                 data = result.get('data') or {}
-                logger.info(f"Batch blacklist update: {len(unique_ids)} IPs set to {flag}")
-                return {
+                response = {
                     'success': True,
                     'requested': data.get('requested', len(unique_ids)),
                     'changes': data.get('changes', 0),
-                    'sync_blacklisted': data.get('sync_blacklisted', flag),
+                    'blacklist_type': data.get('blacklist_type', blacklist_type),
+                    'blacklist_field': normalized_field,
+                    normalized_field: data.get(normalized_field, flag),
                     'raw': result
                 }
+                if normalized_field == 'sync_blacklisted':
+                    response['sync_blacklisted'] = data.get('sync_blacklisted', flag)
+                else:
+                    response['node_blacklisted'] = data.get('node_blacklisted', flag)
+                logger.info(f"Batch blacklist update ({blacklist_type}): {len(unique_ids)} IPs set to {flag}")
+                return response
         except Exception as e:
             logger.warning(f"Batch blacklist API failed: {str(e)}, falling back to individual updates")
 
         changes = 0
         failed = 0
         for ip_id in unique_ids:
-            result = self.set_cf_ip_blacklist(ip_id, sync_blacklisted=sync_blacklisted)
+            result = self.set_cf_ip_blacklist(ip_id, blacklisted=blacklisted, field_name=field_name)
             if result and result.get('success'):
                 data = result.get('data') or {}
                 changes += data.get('changes', 1)
             else:
                 failed += 1
 
-        return {
+        response = {
             'success': failed == 0,
             'requested': len(unique_ids),
             'changes': changes,
             'failed': failed,
-            'sync_blacklisted': flag
+            'blacklist_type': blacklist_type,
+            'blacklist_field': normalized_field,
+            normalized_field: flag
         }
+        if normalized_field == 'sync_blacklisted':
+            response['sync_blacklisted'] = flag
+        else:
+            response['node_blacklisted'] = flag
+        return response
 
     def batch_update_cf_ips(self, updates, max_workers=10):
         """Batch update CF IPs using concurrent requests (legacy fallback)

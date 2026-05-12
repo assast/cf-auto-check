@@ -14,14 +14,19 @@ class DummyApiClient:
             return []
         return list(self.cfips)
 
-    def batch_blacklist_cf_ips(self, ids, sync_blacklisted=True):
-        self.blacklist_calls.append((list(ids), sync_blacklisted))
-        return {
+    def batch_blacklist_cf_ips(self, ids, blacklisted=True, field_name='sync_blacklisted'):
+        self.blacklist_calls.append((list(ids), blacklisted, field_name))
+        response = {
             'success': True,
             'requested': len(ids),
             'changes': len(ids),
-            'sync_blacklisted': 1 if sync_blacklisted else 0
+            'blacklist_type': 'dns' if field_name == 'sync_blacklisted' else 'node',
+            'blacklist_field': field_name,
+            field_name: 1 if blacklisted else 0
         }
+        if field_name == 'sync_blacklisted':
+            response['sync_blacklisted'] = 1 if blacklisted else 0
+        return response
 
 
 def build_service(api_client, current_ip='134.185.109.244', filter_port=443):
@@ -54,7 +59,7 @@ def test_blacklist_current_cf_matches_exact_invalid_record():
 
     assert status_code == 200
     assert result['blacklisted_ids'] == [15115]
-    assert api_client.blacklist_calls == [([15115], True)]
+    assert api_client.blacklist_calls == [([15115], True, 'sync_blacklisted')]
 
 
 def test_blacklist_current_cf_returns_502_when_cfip_query_fails():

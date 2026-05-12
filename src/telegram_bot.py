@@ -65,7 +65,7 @@ class TelegramBotController:
             {'command': 'start', 'description': '显示完整帮助'},
             {'command': 'cfst', 'description': '触发 CFST 检测（详见 /start）'},
             {'command': 'cfst_maint', 'description': '触发启用数据维护任务'},
-            {'command': 'cfst_blacklist_current', 'description': '拉黑当前 CF 同步 IP 并重新维护'},
+            {'command': 'cfst_blacklist_current', 'description': '将当前 CF 同步 IP 加入 DNS 黑名单并重新维护'},
             {'command': 'cfst_status', 'description': '查看 CFST 检测状态'},
             {'command': 'cf_sync', 'description': '手动同步指定 IP 到 Cloudflare'}
         ]
@@ -171,7 +171,7 @@ class TelegramBotController:
         if lower.startswith('/cfst_blacklist_current '):
             return (
                 "⚠️ <b>/cfst_blacklist_current</b> 不需要额外参数。\n\n"
-                "它会拉黑当前记录的 CF 同步 IP，并重新触发启用数据维护。"
+                "它会把当前记录的 CF 同步 IP 加入 DNS 黑名单，并重新触发启用数据维护。"
             )
         if lower.startswith('/cf_sync '):
             ip = cmd.split(None, 1)[1].strip()
@@ -282,7 +282,7 @@ class TelegramBotController:
             "<code>/cfst latency force</code> - 强制重跑延迟\n"
             "<code>/cfst speed force</code> - 强制重跑速度\n"
             "<code>/cfst_maint</code> - 触发启用数据维护，并推送运行结果\n"
-            "<code>/cfst_blacklist_current</code> - 拉黑当前 CF 同步 IP，并重新触发启用数据维护\n"
+            "<code>/cfst_blacklist_current</code> - 将当前 CF 同步 IP 加入 DNS 黑名单，并重新触发启用数据维护\n"
             "<code>/cfst_status</code> - 查看检测状态\n"
             "<code>/cf_sync &lt;IP&gt;</code> - 手动同步指定 IP 到 Cloudflare A 记录\n\n"
             "📥 <b>自动入库</b>：直接把频道里那段 <code>#CF优选IP</code> 文本转发给机器人，它会解析 IP/端口并尝试入库。\n"

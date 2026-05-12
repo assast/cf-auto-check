@@ -8,13 +8,16 @@
 - 新增基于 `SYNC_TO_CF_CRON` 的启用数据维护任务，定时重测已启用记录的延迟和速度。
 - 新增 Telegram 命令 `/cfst_maint`，可手动触发启用数据维护任务。
 - 新增 Telegram 维护结果通知，包含同步摘要、参与数量、写回数量和同步候选详情。
-- 新增 GET 接口 `/blacklist-current-cf?key=...`，可拉黑当前 Cloudflare DNS A 记录对应的 CFIP 并重新触发启用数据维护。
-- 新增 Telegram 命令 `/cfst_blacklist_current`，复用当前 CF 同步 IP 拉黑和维护重跑流程。
+- 新增 GET 接口 `/blacklist-current-cf?key=...`，可将当前 Cloudflare DNS A 记录对应的 CFIP 加入 DNS 黑名单并重新触发启用数据维护。
+- 新增 Telegram 命令 `/cfst_blacklist_current`，复用当前 CF 同步 IP 加入 DNS 黑名单和维护重跑流程。
 - 新增 CFIP 黑名单 API 客户端方法，支持 `/api/cfip/batch/blacklist` 并提供单条更新回退。
 
 ### 调整
-- 普通 CFIP 检测和启用数据维护任务跳过 `sync_blacklisted=1` 的 CFIP。
-- 当前 CF 同步 IP 拉黑流程改为实时查询 Cloudflare DNS 当前 A 记录，不依赖本地状态文件。
+- 原有单一黑名单语义割接为 `DNS` 黑名单，兼容读取旧 `sync_blacklisted` 字段。
+- Cloudflare DNS 同步候选会跳过 `sync_blacklisted=1` 的记录，并顺延到下一位可用候选。
+- 普通 CFIP 检测和启用数据维护任务改为只跳过 `node_blacklisted=1` 的 CFIP；`DNS` 黑名单不再阻止测速或维护。
+- 本地触发 API 新增双黑名单查询与设置接口，支持界面侧按 `DNS` / `节点` 维度执行拉黑、解黑和查询。
+- 当前 CF 同步 IP 的 DNS 黑名单流程改为实时查询 Cloudflare DNS 当前 A 记录，不依赖本地状态文件。
 - 修复当前 CF 同步 IP 拉黑流程中的误报：当 `/api/cfip` 查询失败时，返回明确的查询失败错误，不再误报为“没有匹配的 CFIP 记录”。
 - 维护任务的同步目标重新遵循 `SYNC_TO_CF_FILTER_PORT`；保持 `443` 可延续原有行为，设为 `0` 则允许全端口参与选择。
 - 维护任务在域名解析失败或测速失败时恢复 `DOMAIN-KEEP` 语义，不再把域名记录直接标记为 `invalid`。
