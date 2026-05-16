@@ -134,9 +134,10 @@ docker-compose up -d
 
 1. 通过 Cloudflare DNS API 查询 `CF_RECORD_NAME` 当前 A 记录 IP。
 2. 使用当前 IP 在管理 API 的 CFIP 列表中定位记录；如果 `SYNC_TO_CF_FILTER_PORT>0`，优先按该端口匹配。
-3. 调用 `/api/cfip/batch/blacklist` 将匹配记录的 DNS 黑名单置为 `1`，对应字段为 `sync_blacklisted`。
-4. 异步触发启用数据维护任务，重新测速 enabled CFIP，并在同步 Cloudflare DNS 时跳过已加入 DNS 黑名单的候选。
-5. Telegram 命令 `/cfst_blacklist_current` 与 HTTP 接口复用同一流程。
+3. 如果没有匹配记录，则以当前 Cloudflare A 记录 IP 创建一条 `status=invalid` 且 `sync_blacklisted=1` 的 CFIP。
+4. 调用 `/api/cfip/batch/blacklist` 将目标记录的 DNS 黑名单置为 `1`，对应字段为 `sync_blacklisted`。
+5. 异步触发启用数据维护任务，重新测速 enabled CFIP，并在同步 Cloudflare DNS 时跳过已加入 DNS 黑名单的候选。
+6. Telegram 命令 `/cfst_blacklist_current` 与 HTTP 接口复用同一流程。
 
 ### 配置说明
 

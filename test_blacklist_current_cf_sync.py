@@ -2,10 +2,12 @@ from src.main import CFAutoCheck
 
 
 class DummyApiClient:
-    def __init__(self, cfips=None, error=None):
+    def __init__(self, cfips=None, error=None, create_response=None):
         self.cfips = list(cfips or [])
         self.error = error
+        self.create_response = create_response
         self.blacklist_calls = []
+        self.create_calls = []
 
     def get_cf_ips(self, raise_on_error=False):
         if self.error:
@@ -27,6 +29,10 @@ class DummyApiClient:
         if field_name == 'sync_blacklisted':
             response['sync_blacklisted'] = 1 if blacklisted else 0
         return response
+
+    def create_cf_ip(self, data):
+        self.create_calls.append(dict(data))
+        return self.create_response
 
 
 def build_service(api_client, current_ip='134.185.109.244', filter_port=443):
@@ -71,3 +77,27 @@ def test_blacklist_current_cf_returns_502_when_cfip_query_fails():
     assert status_code == 502
     assert result['error'] == 'Failed to query CFIP records'
     assert result['current_ip'] == '134.185.109.244'
+
+
+def test_blacklist_current_cf_creates_blacklisted_record_when_no_cfip_matches():
+    api_client = DummyApiClient(
+        cfips=[],
+        create_response={'success': True, 'data': {'id': 22110}}
+    )
+    service = build_service(api_client, current_ip='104.26.10.221')
+
+    result, status_code = service.blacklist_current_cf_and_trigger_maintenance(source='api')
+
+    assert status_code == 200
+    assert result['current_ip'] == '104.26.10.221'
+    assert result['blacklisted_ids'] == [22110]
+    assert api_client.create_calls == [{
+        'address': '104.26.10.221',
+        'port': 443,
+        'status': 'invalid',
+        'remark': 'Auto DNS blacklist 104.26.10.221:443',
+        'name': 'Auto DNS blacklist 104.26.10.221:443',
+        'sync_blacklisted': 1,
+        'node_blacklisted': 0
+    }]
+    assert api_client.blacklist_calls == [([22110], True, 'sync_blacklisted')]

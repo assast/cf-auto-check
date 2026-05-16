@@ -285,6 +285,33 @@ class CFAutoCheck:
 
         return self._dedupe_cfip_refs(resolved_refs)
 
+    def _create_dns_blacklisted_cfip_ref(self, ip_address, port):
+        target_port = self._normalize_positive_int(port) or 443
+        payload = {
+            'address': ip_address,
+            'port': target_port,
+            'status': 'invalid',
+            'remark': f'Auto DNS blacklist {ip_address}:{target_port}',
+            'name': f'Auto DNS blacklist {ip_address}:{target_port}',
+            'sync_blacklisted': 1,
+            'node_blacklisted': 0
+        }
+        created = self.api_client.create_cf_ip(payload)
+        data = created.get('data') if isinstance(created, dict) else None
+        data = data if isinstance(data, dict) else {}
+        cfip_id = self._normalize_positive_int(data.get('id')) or self._normalize_positive_int(
+            created.get('id') if isinstance(created, dict) else None
+        )
+        if not cfip_id:
+            return None, payload, created
+        return {
+            'id': cfip_id,
+            'address': ip_address,
+            'port': target_port,
+            'sync_blacklisted': 1,
+            'node_blacklisted': 0
+        }, payload, created
+
     def _is_dns_sync_candidate_allowed(self, result):
         key = (result.get('address'), self._normalize_positive_int(result.get('port')) or 443)
         cfip_list = getattr(self, 'ip_port_to_cfips', {}).get(key, [])
@@ -481,13 +508,24 @@ class CFAutoCheck:
             refs = self._find_cfip_refs_for_ip(current_ip, cfips=cfips)
 
         ids = [ref['id'] for ref in refs]
+        created_cfip = None
         if not ids:
-            return {
-                'success': False,
-                'error': 'Current Cloudflare sync IP has no matching CFIP record',
-                'current_ip': current_ip,
-                'port': target_port
-            }, 404
+            created_ref, create_payload, create_result = self._create_dns_blacklisted_cfip_ref(
+                current_ip,
+                target_port
+            )
+            if not created_ref:
+                return {
+                    'success': False,
+                    'error': 'Failed to create DNS-blacklisted CFIP record for current Cloudflare sync IP',
+                    'current_ip': current_ip,
+                    'port': target_port,
+                    'create_payload': create_payload,
+                    'create': create_result
+                }, 502
+            refs = [created_ref]
+            ids = [created_ref['id']]
+            created_cfip = created_ref
 
         blacklist_result = self.api_client.batch_blacklist_cf_ips(
             ids,
@@ -512,7 +550,8 @@ class CFAutoCheck:
             'blacklisted_ids': ids,
             'blacklist': blacklist_result,
             'maintenance': maintenance_message,
-            'cfip_refs': refs
+            'cfip_refs': refs,
+            'created_cfip': created_cfip
         }, 200
 
     def start(self):
