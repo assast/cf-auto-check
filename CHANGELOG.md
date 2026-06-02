@@ -14,9 +14,10 @@
 
 ### 调整
 - 原有单一黑名单语义割接为 `DNS` 黑名单，兼容读取旧 `sync_blacklisted` 字段。
-- Cloudflare DNS 同步候选会跳过 `sync_blacklisted=1` 的记录，并顺延到下一位可用候选。
+- Cloudflare DNS 同步候选会跳过 `sync_blacklisted=1` 的记录、关联不到 CFIP 的测速结果，以及同一 `IP:port` 下任一记录已 DNS 拉黑的重复候选，并顺延到下一位可用候选。
 - 普通 CFIP 检测和启用数据维护任务改为只跳过 `node_blacklisted=1` 的 CFIP；`DNS` 黑名单不再阻止测速或维护。
 - 本地触发 API 新增双黑名单查询与设置接口，支持界面侧按 `DNS` / `节点` 维度执行拉黑、解黑和查询。
+- `/blacklist-current-cf` 新增 `strategy` 参数，支持默认拉黑后维护和 `strategy=maintenance` 直接触发维护。
 - 当前 CF 同步 IP 的 DNS 黑名单流程改为实时查询 Cloudflare DNS 当前 A 记录，不依赖本地状态文件。
 - 当前 Cloudflare A 记录 IP 没有匹配 CFIP 时，会以当前 CF IP 创建一条已加入 DNS 黑名单的 CFIP，不再直接返回无匹配失败。
 - 修复当前 CF 同步 IP 拉黑流程中的误报：当 `/api/cfip` 查询失败时，返回明确的查询失败错误，不再误报为“没有匹配的 CFIP 记录”。

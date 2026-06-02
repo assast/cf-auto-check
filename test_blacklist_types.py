@@ -72,6 +72,59 @@ def test_filter_dns_sync_candidates_skips_sync_blacklisted_results():
     assert [item['address'] for item in allowed] == ['2.2.2.2']
 
 
+def test_filter_dns_sync_candidates_skips_duplicate_when_any_record_blacklisted():
+    service = build_service()
+    service.ip_port_to_cfips = {
+        ('1.1.1.1', 443): [
+            {'id': 1, 'sync_blacklisted': 1},
+            {'id': 2, 'sync_blacklisted': 0},
+        ],
+        ('2.2.2.2', 443): [{'id': 3, 'sync_blacklisted': 0}],
+    }
+    results = [
+        {'address': '1.1.1.1', 'port': 443, 'speed': 10, 'latency': 5},
+        {'address': '2.2.2.2', 'port': 443, 'speed': 8, 'latency': 6},
+    ]
+
+    allowed, skipped = service._filter_dns_sync_candidates(results, "[Test]")
+
+    assert skipped == 1
+    assert [item['address'] for item in allowed] == ['2.2.2.2']
+
+
+def test_filter_dns_sync_candidates_matches_string_port_blacklist_mapping():
+    service = build_service()
+    service.ip_port_to_cfips = {
+        ('1.1.1.1', '443'): [{'id': 1, 'sync_blacklisted': 1}],
+        ('2.2.2.2', 443): [{'id': 2, 'sync_blacklisted': 0}],
+    }
+    results = [
+        {'address': '1.1.1.1', 'port': 443, 'speed': 10, 'latency': 5},
+        {'address': '2.2.2.2', 'port': 443, 'speed': 8, 'latency': 6},
+    ]
+
+    allowed, skipped = service._filter_dns_sync_candidates(results, "[Test]")
+
+    assert skipped == 1
+    assert [item['address'] for item in allowed] == ['2.2.2.2']
+
+
+def test_filter_dns_sync_candidates_skips_unmapped_results():
+    service = build_service()
+    service.ip_port_to_cfips = {
+        ('2.2.2.2', 443): [{'id': 2, 'sync_blacklisted': 0}],
+    }
+    results = [
+        {'address': '1.1.1.1', 'port': 443, 'speed': 10, 'latency': 5},
+        {'address': '2.2.2.2', 'port': 443, 'speed': 8, 'latency': 6},
+    ]
+
+    allowed, skipped = service._filter_dns_sync_candidates(results, "[Test]")
+
+    assert skipped == 1
+    assert [item['address'] for item in allowed] == ['2.2.2.2']
+
+
 def test_query_cfip_blacklist_records_filters_node_blacklisted_entries():
     service = build_service()
     service.api_client = DummyApiClient(cfips=[

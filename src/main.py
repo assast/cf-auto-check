@@ -170,6 +170,26 @@ class CFAutoCheck:
         }
         return mapping.get(value)
 
+    def _normalize_current_cf_strategy(self, strategy):
+        value = str(strategy or '').strip().lower()
+        if not value:
+            return 'blacklist'
+        value = value.replace('-', '_').replace('+', '_').replace(' ', '_')
+        mapping = {
+            'blacklist': 'blacklist',
+            'dns_blacklist': 'blacklist',
+            'blacklist_maintenance': 'blacklist',
+            'blacklist_and_maintenance': 'blacklist',
+            'blacklist_then_maintenance': 'blacklist',
+            'maintenance': 'maintenance',
+            'maintain': 'maintenance',
+            'direct': 'maintenance',
+            'direct_maintenance': 'maintenance',
+            'trigger': 'maintenance',
+            'trigger_maintenance': 'maintenance',
+        }
+        return mapping.get(value)
+
     def _is_truthy_flag(self, value):
         if isinstance(value, str):
             return value.strip().lower() in ['1', 'true', 'yes', 'on']
@@ -313,11 +333,31 @@ class CFAutoCheck:
         }, payload, created
 
     def _is_dns_sync_candidate_allowed(self, result):
-        key = (result.get('address'), self._normalize_positive_int(result.get('port')) or 443)
-        cfip_list = getattr(self, 'ip_port_to_cfips', {}).get(key, [])
+        cfip_list = self._get_cfips_for_sync_result(result)
         if not cfip_list:
-            return True
-        return any(not self._is_dns_blacklisted(cfip) for cfip in cfip_list)
+            return False
+        return not any(self._is_dns_blacklisted(cfip) for cfip in cfip_list)
+
+    def _get_cfips_for_sync_result(self, result):
+        address = str(result.get('address') or '').strip()
+        port = self._normalize_positive_int(result.get('port')) or 443
+        cfip_map = getattr(self, 'ip_port_to_cfips', {}) or {}
+
+        cfip_list = cfip_map.get((address, port), [])
+        if cfip_list:
+            return cfip_list
+
+        matched = []
+        for key, mapped_cfips in cfip_map.items():
+            if not isinstance(key, tuple) or len(key) != 2:
+                continue
+            mapped_address, mapped_port = key
+            if str(mapped_address or '').strip() != address:
+                continue
+            if (self._normalize_positive_int(mapped_port) or 443) != port:
+                continue
+            matched.extend(mapped_cfips or [])
+        return matched
 
     def _filter_dns_sync_candidates(self, results, context):
         allowed = []
@@ -328,9 +368,9 @@ class CFAutoCheck:
                 allowed.append(result)
                 continue
             skipped += 1
-            logger.info(f"{context} Skipping DNS-blacklisted sync candidate {result.get('address')}:{port}")
+            logger.info(f"{context} Skipping unmapped or DNS-blacklisted sync candidate {result.get('address')}:{port}")
         if skipped:
-            logger.info(f"{context} skipped {skipped} DNS-blacklisted sync candidate(s)")
+            logger.info(f"{context} skipped {skipped} unmapped or DNS-blacklisted sync candidate(s)")
         return allowed, skipped
 
     def query_cfip_blacklist_records(
@@ -469,7 +509,16 @@ class CFAutoCheck:
         })
         return result, status_code
 
-    def blacklist_current_cf_and_trigger_maintenance(self, source='api'):
+    def blacklist_current_cf_and_trigger_maintenance(self, source='api', strategy='blacklist'):
+        normalized_strategy = self._normalize_current_cf_strategy(strategy)
+        if not normalized_strategy:
+            return {
+                'success': False,
+                'error': 'Unsupported strategy',
+                'strategy': strategy,
+                'supported_strategies': ['blacklist', 'maintenance']
+            }, 400
+
         if self.check_running:
             return {
                 'success': False,
@@ -477,6 +526,15 @@ class CFAutoCheck:
                 'phase': self.last_check_meta.get('phase'),
                 'source': self.last_check_meta.get('source')
             }, 409
+
+        if normalized_strategy == 'maintenance':
+            maintenance_message = self.trigger_enabled_maintenance(source=source)
+            return {
+                'success': True,
+                'strategy': normalized_strategy,
+                'message': 'Enabled maintenance triggered without blacklisting current Cloudflare sync IP',
+                'maintenance': maintenance_message
+            }, 200
 
         if not self.cf_api_token or not self.cf_zone_id or not self.cf_record_name:
             return {
@@ -545,6 +603,7 @@ class CFAutoCheck:
         return {
             'success': True,
             'message': 'Current Cloudflare sync IP added to DNS blacklist and enabled maintenance triggered',
+            'strategy': normalized_strategy,
             'current_ip': current_ip,
             'port': target_port,
             'blacklisted_ids': ids,
@@ -708,7 +767,10 @@ class CFAutoCheck:
                     self.wfile.write(json.dumps({'message': msg, 'phase': phase, 'force': force_refresh, 'detail': response}).encode())
 
                 elif parsed.path == '/blacklist-current-cf':
-                    result, status_code = service.blacklist_current_cf_and_trigger_maintenance(source='api')
+                    result, status_code = service.blacklist_current_cf_and_trigger_maintenance(
+                        source='api',
+                        strategy=self._query_arg(query, 'strategy', 'blacklist')
+                    )
                     self._write_json(status_code, result)
 
                 elif parsed.path == '/cfip-blacklist/query':
@@ -948,7 +1010,7 @@ class CFAutoCheck:
         
         for cfip in cfips:
             address = cfip.get('address')
-            port = cfip.get('port', 443)
+            port = self._normalize_positive_int(cfip.get('port')) or 443
             cfip_id = cfip.get('id')
             
             # Check if address is a domain name

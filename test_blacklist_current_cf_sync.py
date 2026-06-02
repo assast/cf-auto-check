@@ -101,3 +101,34 @@ def test_blacklist_current_cf_creates_blacklisted_record_when_no_cfip_matches():
         'node_blacklisted': 0
     }]
     assert api_client.blacklist_calls == [([22110], True, 'sync_blacklisted')]
+
+
+def test_blacklist_current_cf_maintenance_strategy_only_triggers_maintenance():
+    api_client = DummyApiClient(error=RuntimeError('should not query cfips'))
+    service = build_service(api_client)
+    service.cf_api_token = ''
+    service.cf_zone_id = ''
+    service.cf_record_name = ''
+
+    result, status_code = service.blacklist_current_cf_and_trigger_maintenance(
+        source='api',
+        strategy='maintenance'
+    )
+
+    assert status_code == 200
+    assert result['strategy'] == 'maintenance'
+    assert result['maintenance'] == 'maint:api'
+    assert api_client.create_calls == []
+    assert api_client.blacklist_calls == []
+
+
+def test_blacklist_current_cf_rejects_unknown_strategy():
+    service = build_service(DummyApiClient())
+
+    result, status_code = service.blacklist_current_cf_and_trigger_maintenance(
+        source='api',
+        strategy='unknown'
+    )
+
+    assert status_code == 400
+    assert result['error'] == 'Unsupported strategy'

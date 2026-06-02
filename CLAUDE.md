@@ -96,7 +96,7 @@ docker-compose up -d
 7. 获取 IP 地理信息（ipapi.is API）
 8. 同步 CF DNS + 发送 Telegram 通知
 
-`sync_blacklisted=1` 的 CFIP 只会在 Cloudflare DNS 同步候选选择时跳过，并顺延下一位；`node_blacklisted=1` 的 CFIP 会在普通检测和启用维护任务中跳过。
+`sync_blacklisted=1` 的 CFIP 只会在 Cloudflare DNS 同步候选选择时跳过，并顺延下一位；同一 `IP:port` 下任一关联记录被 DNS 拉黑，或测速结果无法映射回 CFIP，也会跳过同步；`node_blacklisted=1` 的 CFIP 会在普通检测和启用维护任务中跳过。
 
 #### 缓存和重跑支持
 
@@ -122,13 +122,14 @@ docker-compose up -d
   - `/trigger?key=xxx&force=true` - 强制重跑（删除缓存）
   - `/trigger?key=xxx&phase=latency&force=true` - 强制重跑延迟
   - `/blacklist-current-cf?key=xxx` - 查询当前 Cloudflare DNS A 记录 IP，将匹配的 CFIP 加入 DNS 黑名单，并触发启用数据维护
+  - `/blacklist-current-cf?key=xxx&strategy=maintenance` - 不拉黑，直接触发启用数据维护
   - `/cfip-blacklist/query?key=xxx&type=dns&blacklisted=true` - 查询双黑名单状态，支持 `dns/node`、`id/ids`、`address`、`port`、`status`、`limit`
   - `/cfip-blacklist/set?key=xxx&type=node&ids=1,2&blacklisted=false` - 设置或解除指定类型黑名单
   - `/status?key=xxx` - 查看状态
   - `/health` - 健康检查
 - API key 验证
 - 防止并发检测
-- `/blacklist-current-cf` 必须配置 `API_TRIGGER_KEY`，同时依赖 `CF_API_TOKEN`、`CF_ZONE_ID`、`CF_RECORD_NAME` 查询当前 DNS A 记录。
+- `/blacklist-current-cf` 必须配置 `API_TRIGGER_KEY`；默认 `strategy=blacklist` 同时依赖 `CF_API_TOKEN`、`CF_ZONE_ID`、`CF_RECORD_NAME` 查询当前 DNS A 记录，`strategy=maintenance` 只触发维护。
 
 #### 当前 CF 同步 IP DNS 黑名单流程
 
@@ -138,6 +139,8 @@ docker-compose up -d
 4. 调用 `/api/cfip/batch/blacklist` 将目标记录的 DNS 黑名单置为 `1`，对应字段为 `sync_blacklisted`。
 5. 异步触发启用数据维护任务，重新测速 enabled CFIP，并在同步 Cloudflare DNS 时跳过已加入 DNS 黑名单的候选。
 6. Telegram 命令 `/cfst_blacklist_current` 与 HTTP 接口复用同一流程。
+
+`strategy=maintenance` 会跳过 1-4，直接执行第 5 步。
 
 ### 配置说明
 
